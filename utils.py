@@ -4,6 +4,7 @@ import numpy as np
 from alphafold.common import protein
 from alphafold.common import residue_constants
 from alphafold.model import model
+from alphafold.model import folding
 
 #########################
 # rmsd
@@ -31,9 +32,21 @@ def jnp_rmsd(true, pred, add_dist=False):
   return loss
 
 ####################
+# confidence metrics
+####################
+def get_plddt(outputs):
+  logits = outputs["predicted_lddt"]["logits"]
+  num_bins = logits.shape[-1]
+  bin_width = 1.0 / num_bins
+  bin_centers = jnp.arange(start=0.5 * bin_width, stop=1.0, step=bin_width)
+  probs = jax.nn.softmax(logits, axis=-1)
+  return jnp.sum(probs * bin_centers[None, :], axis=-1)
+
+####################
 # loss functions
 ####################
-def get_dgram_loss(batch, outputs):
+def get_dgram_loss(batch, outputs, model_config):
+  # get cb-cb features (ca in case of glycine)
   pb, pb_mask = model.modules.pseudo_beta_fn(batch["aatype"],
                                              batch["all_atom_positions"],
                                              batch["all_atom_mask"])
@@ -41,8 +54,15 @@ def get_dgram_loss(batch, outputs):
   dgram_loss = model.modules._distogram_log_loss(outputs["distogram"]["logits"],
                                                  outputs["distogram"]["bin_edges"],
                                                  batch={"pseudo_beta":pb,"pseudo_beta_mask":pb_mask},
-                                                 num_bins=64)
+                                                 num_bins=model_config.model.heads.distogram.num_bins)
   return dgram_loss["loss"]
+
+def get_fape_loss(batch, outputs, model_config, use_clamped_fape=False):
+  sub_batch = jax.tree_map(lambda x: x, batch)
+  sub_batch["use_clamped_fape"] = use_clamped_fape
+  loss = {"loss":0.0}    
+  folding.backbone_loss(loss, sub_batch, outputs["structure_module"], model_config.model.heads.structure_module)
+  return loss["loss"]
 
 ####################
 # update sequence
