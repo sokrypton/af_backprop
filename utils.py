@@ -126,6 +126,7 @@ def pdb_to_string(pdb_file):
 
 def save_pdb(outs, filename="tmp.pdb"):
   seq = outs["seq"].argmax(-1)
+  while seq.ndim > 1: seq = seq[0]
   b_factors = np.zeros_like(outs["outputs"]['final_atom_mask'])
   p = protein.Protein(
         aatype=seq,
