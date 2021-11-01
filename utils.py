@@ -45,6 +45,11 @@ def get_plddt(outputs):
 ####################
 # loss functions
 ####################
+def get_rmsd_loss(batch, outputs):
+  true = batch["all_atom_positions"][:,1,:]
+  pred = outputs["structure_module"]["final_atom_positions"][:,1,:]
+  return jnp_rmsd(true, pred)
+
 def get_dgram_loss(batch, outputs, model_config):
   # get cb-cb features (ca in case of glycine)
   pb, pb_mask = model.modules.pseudo_beta_fn(batch["aatype"],
