@@ -51,8 +51,7 @@ class RunModel:
   def __init__(self,
                config: ml_collections.ConfigDict,
                params: Optional[Mapping[str, Mapping[str, np.ndarray]]] = None,
-               is_training=True,
-               inc_prev=False):
+               is_training=True):
     self.config = config
     self.params = params
 
@@ -62,8 +61,7 @@ class RunModel:
           batch,
           is_training=is_training,
           compute_loss=False,
-          ensemble_representations=False,
-          inc_prev=inc_prev)
+          ensemble_representations=False)
 
     self.apply = jax.jit(hk.transform(_forward_fn).apply)
     self.init = jax.jit(hk.transform(_forward_fn).init)
@@ -133,10 +131,7 @@ class RunModel:
     self.init_params(feat)
     logging.info('Running predict with shape(feat) = %s',
                  tree.map_structure(lambda x: x.shape, feat))
-    if inc_prev:
-      result, prev_result = self.apply(self.params, jax.random.PRNGKey(0), feat)
-    else:
-      result = self.apply(self.params, jax.random.PRNGKey(0), feat)
+    result = self.apply(self.params, jax.random.PRNGKey(0), feat)
     # This block is to ensure benchmark timings are accurate. Some blocking is
     # already happening when computing get_confidence_metrics, and this ensures
     # all outputs are blocked on.
@@ -144,7 +139,4 @@ class RunModel:
     result.update(get_confidence_metrics(result))
     logging.info('Output shape was %s',
                  tree.map_structure(lambda x: x.shape, result))
-    if inc_prev:
-      return result, prev_result
-    else:
-      return result
+    return result
