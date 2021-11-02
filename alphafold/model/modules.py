@@ -284,7 +284,8 @@ class AlphaFold(hk.Module):
       is_training,
       compute_loss=False,
       ensemble_representations=False,
-      return_representations=False):
+      return_representations=False,
+      inc_prev=False):
     """Run the AlphaFold model.
 
     Arguments:
@@ -317,7 +318,13 @@ class AlphaFold(hk.Module):
           'prev_pos':ret['structure_module']['final_atom_positions'],
           'prev_msa_first_row': ret['representations']['msa_first_row'],
           'prev_pair': ret['representations']['pair'],
+          'prev_dgram': ret["distogram"]["logits"],
+          'prev_plddt': ret["predicted_lddt"]["logits"],
       }
+      if "predicted_aligned_error" in ret:
+        new_prev["prev_pae"] = ret["predicted_aligned_error"]["logits"]
+      else:
+        new_prev["prev_pae"] = jnp.zeros_like(new_prev['prev_dgram'])
       if self.config.backprop_recycle:
         return new_prev
       else:
@@ -352,7 +359,11 @@ class AlphaFold(hk.Module):
           'prev_pos': jnp.zeros([num_residues, residue_constants.atom_type_num, 3]),
           'prev_msa_first_row': jnp.zeros([num_residues, emb_config.msa_channel]),
           'prev_pair': jnp.zeros([num_residues, num_residues, emb_config.pair_channel]),
+          'prev_dgram': jnp.zeros([num_residues, num_residues, 64]),
+          'prev_plddt': jnp.zeros([num_residues, 50]),
+          'prev_pae': jnp.zeros([num_residues, num_residues, 64])
       }
+
 
       if 'num_iter_recycling' in batch:
         # Training time: num_iter_recycling is in batch.
@@ -367,14 +378,14 @@ class AlphaFold(hk.Module):
         # Eval mode or tests: use the maximum number of iterations.
         num_iter = self.config.num_recycle
       
-      if self.config.backprop_recycle:
+      if inc_prev or self.config.backprop_recycle:
         def body(p,i):
           p = get_prev(do_call(p, recycle_idx=i, compute_loss=False))
-          return p, None
+          return p,p
         if hk.running_init():
-          prev,_ = body(prev, 0)
+          prev, prev_prev = body(prev, 0)
         else:
-          prev,_ = hk.scan(body, prev, jnp.arange(num_iter))
+          prev, prev_prev = hk.scan(body, prev, jnp.arange(num_iter))
       else:
         body = lambda x: (x[0] + 1,  # pylint: disable=g-long-lambda
                           get_prev(do_call(x[1], recycle_idx=x[0],
@@ -389,6 +400,7 @@ class AlphaFold(hk.Module):
               body,
               (0, prev))
     else:
+      prev_prev = None
       prev = {}
       num_iter = 0
 
@@ -398,7 +410,10 @@ class AlphaFold(hk.Module):
 
     if not return_representations:
       del (ret[0] if compute_loss else ret)['representations']  # pytype: disable=unsupported-operands
-    return ret
+    if inc_prev:
+      return ret, prev_prev
+    else:
+      return ret
 
 
 class TemplatePairStack(hk.Module):
