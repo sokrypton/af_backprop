@@ -284,8 +284,7 @@ class AlphaFold(hk.Module):
       is_training,
       compute_loss=False,
       ensemble_representations=False,
-      return_representations=False,
-      inc_prev=False):
+      return_representations=False):
     """Run the AlphaFold model.
 
     Arguments:
@@ -325,10 +324,13 @@ class AlphaFold(hk.Module):
         new_prev["prev_pae"] = ret["predicted_aligned_error"]["logits"]
       else:
         new_prev["prev_pae"] = jnp.zeros_like(new_prev['prev_dgram'])
+
       if self.config.backprop_recycle:
         return new_prev
       else:
-        return jax.tree_map(jax.lax.stop_gradient, new_prev)
+        stop_list = ["prev_pos","prev_msa_first_row","prev_pair"]
+        new_prev.update({k:jax.lax.stop_gradient(new_prev[k]) for k in stop_list})
+        return new_prev #return jax.tree_map(jax.lax.stop_gradient, new_prev)
 
     def do_call(prev,
                 recycle_idx,
@@ -352,7 +354,6 @@ class AlphaFold(hk.Module):
           is_training=is_training,
           compute_loss=compute_loss,
           ensemble_representations=ensemble_representations)
-
     if self.config.num_recycle:
       emb_config = self.config.embeddings_and_evoformer
       prev = {
@@ -363,8 +364,6 @@ class AlphaFold(hk.Module):
           'prev_plddt': jnp.zeros([num_residues, 50]),
           'prev_pae': jnp.zeros([num_residues, num_residues, 64])
       }
-
-
       if 'num_iter_recycling' in batch:
         # Training time: num_iter_recycling is in batch.
         # The value for each ensemble batch is the same, so arbitrarily taking
@@ -378,43 +377,54 @@ class AlphaFold(hk.Module):
         # Eval mode or tests: use the maximum number of iterations.
         num_iter = self.config.num_recycle
       
-      if inc_prev or self.config.backprop_recycle:
-        def body(p,i):
-          p = get_prev(do_call(p, recycle_idx=i, compute_loss=False))
-          return p,p
+      def add_prev(p,p_):
+        p_["prev_dgram"] += p["prev_dgram"]
+        p_["prev_plddt"] += p["prev_plddt"]
+        p_["prev_pae"] += p["prev_pae"]
+        return p_
+
+      if self.config.add_prev or self.config.backprop_recycle:
+        def body(p, i):
+          p_ = get_prev(do_call(p, recycle_idx=i, compute_loss=False))
+          if self.config.add_prev:
+            p_ = add_prev(p, p_)
+          return p_, None
         if hk.running_init():
-          prev, prev_prev = body(prev, 0)
+          prev,_ = body(prev, 0)
         else:
-          prev, prev_prev = hk.scan(body, prev, jnp.arange(num_iter))
+          prev,_ = hk.scan(body, prev, jnp.arange(num_iter))
       else:
-        body = lambda x: (x[0] + 1,  # pylint: disable=g-long-lambda
-                          get_prev(do_call(x[1], recycle_idx=x[0],
-                                          compute_loss=False)))
+        def body(x):
+          i,p = x[0],x[1]
+          p_ = get_prev(do_call(p, recycle_idx=i, compute_loss=False))
+          return x[0]+1, p_
         if hk.running_init():
           # When initializing the Haiku module, run one iteration of the
           # while_loop to initialize the Haiku modules used in `body`.
           _, prev = body((0, prev))
         else:
-          _, prev = hk.while_loop(
-              lambda x: x[0] < num_iter,
-              body,
-              (0, prev))
+          _, prev = hk.while_loop(lambda x: x[0] < num_iter, body, (0, prev))
     else:
-      prev_prev = None
       prev = {}
       num_iter = 0
 
     ret = do_call(prev=prev, recycle_idx=num_iter)
+    if self.config.add_prev:
+      prev_ = get_prev(ret)
     if compute_loss:
       ret = ret[0], [ret[1]]
 
     if not return_representations:
       del (ret[0] if compute_loss else ret)['representations']  # pytype: disable=unsupported-operands
-    if inc_prev:
-      return ret, prev_prev
-    else:
-      return ret
 
+    if self.config.add_prev and num_iter > 0:
+      prev_ = add_prev(prev, prev_)
+      ret["distogram"]["logits"] = prev_["prev_dgram"]/(num_iter+1)
+      ret["predicted_lddt"]["logits"] = prev_["prev_plddt"]/(num_iter+1)
+      if "predicted_aligned_error" in ret:
+        ret["predicted_aligned_error"]["logits"] = prev_["prev_pae"]/(num_iter+1)
+
+    return ret
 
 class TemplatePairStack(hk.Module):
   """Pair stack for the templates.
