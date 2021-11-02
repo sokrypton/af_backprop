@@ -401,6 +401,7 @@ CONFIG = ml_collections.ConfigDict({
         },
         'num_recycle': 3,
         'backprop_recycle': False,
-        'resample_msa_in_recycling': True
+        'resample_msa_in_recycling': True,
+        'add_prev': False,
     },
 })
