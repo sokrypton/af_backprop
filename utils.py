@@ -50,13 +50,15 @@ def get_rmsd_loss(batch, outputs):
   pred = outputs["structure_module"]["final_atom_positions"][:,1,:]
   return jnp_rmsd(true, pred)
 
-def get_dgram_loss(batch, outputs, model_config):
+def get_dgram_loss(batch, outputs, model_config, logits=None):
   # get cb-cb features (ca in case of glycine)
   pb, pb_mask = model.modules.pseudo_beta_fn(batch["aatype"],
                                              batch["all_atom_positions"],
                                              batch["all_atom_mask"])
   
-  dgram_loss = model.modules._distogram_log_loss(outputs["distogram"]["logits"],
+  if logits is None: 
+    logits = outputs["distogram"]["logits"]
+  dgram_loss = model.modules._distogram_log_loss(logits,
                                                  outputs["distogram"]["bin_edges"],
                                                  batch={"pseudo_beta":pb,"pseudo_beta_mask":pb_mask},
                                                  num_bins=model_config.model.heads.distogram.num_bins)
