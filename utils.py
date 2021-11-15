@@ -72,6 +72,99 @@ def get_fape_loss(batch, outputs, model_config, use_clamped_fape=False):
   return loss["loss"]
 
 ####################
+# loss functions (restricted to idx and/or sidechains)
+####################
+def get_dgram_loss_idx(batch, outputs, idx, model_config):
+  idx_ref = batch["idx"]
+  pb, pb_mask = model.modules.pseudo_beta_fn(batch["aatype"][idx_ref],
+                                             batch["all_atom_positions"][idx_ref],
+                                             batch["all_atom_mask"][idx_ref])
+  
+  dgram_loss = model.modules._distogram_log_loss(outputs["distogram"]["logits"][:,idx][idx,:],
+                                                 outputs["distogram"]["bin_edges"],
+                                                 batch={"pseudo_beta":pb,"pseudo_beta_mask":pb_mask},
+                                                 num_bins=model_config.model.heads.distogram.num_bins)
+  return dgram_loss["loss"]
+
+def get_fape_loss_idx(batch, outputs, idx, model_config, backbone=False, sidechain=True, use_clamped_fape=False):
+  idx_ref = batch["idx"]
+  
+  sub_batch = batch.copy()
+  sub_batch.pop("idx")
+  sub_batch = jax.tree_map(lambda x: x[idx_ref,...],sub_batch)
+  sub_batch["use_clamped_fape"] = use_clamped_fape
+  
+  value = jax.tree_map(lambda x: x, outputs["structure_module"])
+  loss = {"loss":0.0}
+  
+  if sidechain:
+    value.update(folding.compute_renamed_ground_truth(sub_batch, value['final_atom14_positions'][idx,...]))
+    value['sidechains']['frames'] = jax.tree_map(lambda x: x[:,idx,:], value["sidechains"]["frames"])
+    value['sidechains']['atom_pos'] = jax.tree_map(lambda x: x[:,idx,:], value["sidechains"]["atom_pos"])
+    loss.update(folding.sidechain_loss(sub_batch, value, model_config.model.heads.structure_module))
+  
+  if backbone:
+    value["traj"] = value["traj"][...,idx,:]
+    folding.backbone_loss(loss, sub_batch, value, model_config.model.heads.structure_module)
+
+  return loss["loss"]
+
+def get_sidechain_rmsd_idx(batch, outputs, idx, model_config, include_ca=False):
+  idx_ref = batch["idx"]
+  bb_atoms_to_exclude = ["N","O"] if include_ca else ["N","CA","O"]
+
+  def kabsch(P, Q):
+    V, S, W = jnp.linalg.svd(P.T @ Q, full_matrices=False)
+    flip = jax.nn.sigmoid(-10 * jnp.linalg.det(V) * jnp.linalg.det(W))
+    S = flip * S.at[-1].set(-S[-1]) + (1-flip) * S
+    V = flip * V.at[:,-1].set(-V[:,-1]) + (1-flip) * V
+    return V@W
+
+  true_aa_idx = batch["aatype"][idx_ref]
+  true_pos = all_atom.atom37_to_atom14(batch["all_atom_positions"],batch)[idx_ref,:,:]
+  pred_pos = outputs["structure_module"]["final_atom14_positions"][idx,:,:]
+
+  i,j,j_alt = [],[],[]
+  i_non,j_non = [],[]
+  for n,aa_idx in enumerate(true_aa_idx):
+    aa = idx_to_resname[aa_idx]
+    atoms = residue_constants.residue_atoms[aa].copy()
+    for atom in atoms:
+      if atom not in bb_atoms_to_exclude:
+        i.append(n)
+        j.append(residue_constants.restype_name_to_atom14_names[aa].index(atom))
+        if aa in residue_constants.residue_atom_renaming_swaps:
+          swaps = residue_constants.residue_atom_renaming_swaps[aa]
+          swaps_rev = {v:k for k,v in swaps.items()}
+          if atom in swaps:
+            j_alt.append(residue_constants.restype_name_to_atom14_names[aa].index(swaps[atom]))
+          elif atom in swaps_rev:
+            j_alt.append(residue_constants.restype_name_to_atom14_names[aa].index(swaps_rev[atom]))
+          else:
+            j_alt.append(j[-1])
+            i_non.append(i[-1])
+            j_non.append(j[-1])
+        else:
+          j_alt.append(j[-1])
+          i_non.append(i[-1])
+          j_non.append(j[-1])
+
+  # align non-ambigious atoms
+  true_pos_non = true_pos[i_non,j_non,:]  
+  pred_pos_non = pred_pos[i_non,j_non,:]
+  true_pos = (true_pos - true_pos_non.mean(0)) @ kabsch(true_pos_non - true_pos_non.mean(0), pred_pos_non - pred_pos_non.mean(0))
+  pred_pos = pred_pos - pred_pos_non.mean(0)
+
+  true_pos_a = true_pos[i,j,:]
+  pred_pos_a = pred_pos[i,j,:]
+  pred_pos_b = pred_pos[i,j_alt,:]
+
+  rms_a = jnp.square(true_pos_a - pred_pos_a).sum(-1)
+  rms_b = jnp.square(true_pos_a - pred_pos_b).sum(-1)
+
+  return jnp.sqrt(jnp.minimum(rms_a,rms_b).mean() + 1e-8)
+
+####################
 # update sequence
 ####################
 def soft_seq(seq_logits, hard=True):
