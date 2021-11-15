@@ -5,6 +5,7 @@ from alphafold.common import protein
 from alphafold.common import residue_constants
 from alphafold.model import model
 from alphafold.model import folding
+from alphafold.model import all_atom
 
 #########################
 # rmsd
