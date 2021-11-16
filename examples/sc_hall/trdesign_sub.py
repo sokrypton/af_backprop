@@ -100,7 +100,7 @@ def get_TrR(blocks=12, trainable=False, weights=None, name="TrR"):
   if weights is not None: model.set_weights(weights)
   return model
 
-def get_TrR_model(L=None, exclude_theta=True, use_idx=True):
+def get_TrR_model(L=None, exclude_theta=False, use_idx=False, use_bkg=False, models_path="models"):
   def gather_idx(x):
     idx = x[1][0]
     return tf.gather(tf.gather(x[0],idx,axis=-2),idx,axis=-3)
@@ -136,7 +136,8 @@ def get_TrR_model(L=None, exclude_theta=True, use_idx=True):
   I_seq_logits = Input((L,20),name="seq_logits")
   seq = Lambda(prep_seq,name="seq")(I_seq_logits)
   I_true = Input((L,L,100),name="true")
-  I_bkg = Input((L,L,100),name="bkg")
+  if use_bkg:
+    I_bkg = Input((L,L,100),name="bkg")
   if use_idx:
     I_idx = Input((None,),dtype=tf.int32,name="idx")
     I_idx_true = Input((None,),dtype=tf.int32,name="idx_true")
@@ -144,7 +145,7 @@ def get_TrR_model(L=None, exclude_theta=True, use_idx=True):
   pred = []
   for nam in ["xaa","xab","xac","xad","xae"]:
     print(nam)
-    TrR = get_TrR(weights=get_TrR_weights(f"models/model_{nam}.npy"),name=nam)
+    TrR = get_TrR(weights=get_TrR_weights(f"{models_path}/model_{nam}.npy"),name=nam)
     pred.append(TrR(seq))
   pred = sum(pred)/len(pred)
 
@@ -156,22 +157,37 @@ def get_TrR_model(L=None, exclude_theta=True, use_idx=True):
     true_sub = I_true
   
   cce_loss = Lambda(get_cce_loss,name="cce_loss")([true_sub, pred_sub])
-  bkg_loss = Lambda(get_bkg_loss,name="bkg_loss")([I_bkg, pred])
-
-  loss = Lambda(lambda x: x[0]+0.1*x[1])([cce_loss,bkg_loss])
+  if use_bkg:
+    bkg_loss = Lambda(get_bkg_loss,name="bkg_loss")([I_bkg, pred])
+    loss = Lambda(lambda x: x[0]+0.1*x[1])([cce_loss,bkg_loss])
+  else:
+    loss = cce_loss
   grad = Lambda(lambda x: tf.gradients(x[0],x[1]), name="grad")([loss,I_seq_logits])
 
-  if use_idx:
-    model = Model([I_seq_logits, I_true, I_bkg, I_idx, I_idx_true], [cce_loss, bkg_loss, grad, pred], name="TrR_model")
-    def TrR_model(seq, true, bkg, pos_idx, pos_idx_ref=None):
-      if pos_idx_ref is None: pos_idx_ref = pos_idx
-      cce_loss, bkg_loss, grad, pred = model.predict([seq[None],true[None],bkg[None],
-                                                      pos_idx[None],pos_idx_ref[None]])
-      return {"cce_loss":cce_loss[0],"bkg_loss":bkg_loss[0],"grad":grad[0],"pred":pred[0]}
-  else:
-    model = Model([I_seq_logits, I_true, I_bkg], [cce_loss, bkg_loss, grad, pred], name="TrR_model")
-    def TrR_model(seq, true, bkg):
-      cce_loss, bkg_loss, grad, pred = model.predict([seq[None],true[None],bkg[None]])
-      return {"cce_loss":cce_loss[0],"bkg_loss":bkg_loss[0],"grad":grad[0],"pred":pred[0]}
+  # setup model
+  inputs = [I_seq_logits, I_true]
+  outputs = [cce_loss]
+  if use_bkg:
+    inputs += [I_bkg]
+    outputs += [bkg_loss]
+  if use_idx: inputs += [I_idx, I_idx_true]  
+  model = Model(intputs, outputs + [grad, pred], name="TrR_model")
+  
+  TrR_model(seq, true, **kwargs):
+    i = [seq[None],true[None]]
+    if use_bkg:
+      i += [kwargs["bkg"][None]]
+    if use_idx:
+      pos_idx = kwargs["pos_idx"]
+      if "pos_idx_ref" not in kwargs or kwargs["pos_idx_ref"] is None:
+        pos_idx_ref = pos_idx
+      else:
+        pos_idx_ref = kwargs["pos_idx_ref"]
+      i += [pos_idx[None],pos_idx_ref[None]]
     
+    *o = model.predict(i)
+    r = {"cce_loss":o[0][0],"grad":o[-1][0],"pred":o[-2][0]}
+    if use_bkg: r["bkg_loss"] = o[1][0]
+    return r
+  
   return TrR_model
