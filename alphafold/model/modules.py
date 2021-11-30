@@ -1807,7 +1807,6 @@ class EmbeddingsAndEvoformer(hk.Module):
     # Embed templates into the pair activations.
     # Jumper et al. (2021) Suppl. Alg. 2 "Inference" lines 9-13
     
-    '''
     if c.template.enabled:
       template_batch = {k: batch[k] for k in batch if k.startswith('template_')}
       template_pair_representation = TemplateEmbedding(c.template, gc)(
@@ -1817,7 +1816,6 @@ class EmbeddingsAndEvoformer(hk.Module):
           is_training=is_training)
 
       pair_activations += template_pair_representation
-    '''
     
     # Embed extra MSA features.
     # Jumper et al. (2021) Suppl. Alg. 2 "Inference" lines 14-16
@@ -1867,6 +1865,57 @@ class EmbeddingsAndEvoformer(hk.Module):
     }
 
     evoformer_masks = {'msa': batch['msa_mask'], 'pair': mask_2d}
+    
+    ####################################################################
+    ####################################################################
+
+    # Append num_templ rows to msa_activations with template embeddings.
+    # Jumper et al. (2021) Suppl. Alg. 2 "Inference" lines 7-8
+    if c.template.enabled and c.template.embed_torsion_angles:
+      num_templ, num_res = batch['template_aatype'].shape
+
+      # Embed the templates aatypes.
+      aatype_one_hot = jax.nn.one_hot(batch['template_aatype'], 22, axis=-1)
+
+      # Embed the templates aatype, torsion angles and masks.
+      # Shape (templates, residues, msa_channels)
+      ret = all_atom.atom37_to_torsion_angles(
+          aatype=batch['template_aatype'],
+          all_atom_pos=batch['template_all_atom_positions'],
+          all_atom_mask=batch['template_all_atom_masks'],
+          # Ensure consistent behaviour during testing:
+          placeholder_for_undefined=not gc.zero_init)
+
+      template_features = jnp.concatenate([
+          aatype_one_hot,
+          jnp.reshape(
+              ret['torsion_angles_sin_cos'], [num_templ, num_res, 14]),
+          jnp.reshape(
+              ret['alt_torsion_angles_sin_cos'], [num_templ, num_res, 14]),
+          ret['torsion_angles_mask']], axis=-1)
+
+      template_activations = common_modules.Linear(
+          c.msa_channel,
+          initializer='relu',
+          name='template_single_embedding')(template_features)
+      template_activations = jax.nn.relu(template_activations)
+      template_activations = common_modules.Linear(
+          c.msa_channel,
+          initializer='relu',
+          name='template_projection')(template_activations)
+
+      # Concatenate the templates to the msa.
+      evoformer_input['msa'] = jnp.concatenate(
+          [evoformer_input['msa'], template_activations], axis=0)
+      # Concatenate templates masks to the msa masks.
+      # Use mask from the psi angle, as it only depends on the backbone atoms
+      # from a single residue.
+      torsion_angle_mask = ret['torsion_angles_mask'][:, :, 2]
+      torsion_angle_mask = torsion_angle_mask.astype(evoformer_masks['msa'].dtype)
+      evoformer_masks['msa'] = jnp.concatenate([evoformer_masks['msa'], torsion_angle_mask], axis=0)    
+      
+    ####################################################################
+    ####################################################################
 
     # Main trunk of the network
     # Jumper et al. (2021) Suppl. Alg. 2 "Inference" lines 17-18
@@ -1908,3 +1957,177 @@ class EmbeddingsAndEvoformer(hk.Module):
     }
 
     return output
+  
+####################################################################
+####################################################################
+class SingleTemplateEmbedding(hk.Module):
+  """Embeds a single template.
+  Jumper et al. (2021) Suppl. Alg. 2 "Inference" lines 9+11
+  """
+
+  def __init__(self, config, global_config, name='single_template_embedding'):
+    super().__init__(name=name)
+    self.config = config
+    self.global_config = global_config
+
+  def __call__(self, query_embedding, batch, mask_2d, is_training):
+    """Build the single template embedding.
+    Arguments:
+      query_embedding: Query pair representation, shape [N_res, N_res, c_z].
+      batch: A batch of template features (note the template dimension has been
+        stripped out as this module only runs over a single template).
+      mask_2d: Padding mask (Note: this doesn't care if a template exists,
+        unlike the template_pseudo_beta_mask).
+      is_training: Whether the module is in training mode.
+    Returns:
+      A template embedding [N_res, N_res, c_z].
+    """
+    assert mask_2d.dtype == query_embedding.dtype
+    dtype = query_embedding.dtype
+    num_res = batch['template_aatype'].shape[0]
+    num_channels = (self.config.template_pair_stack
+                    .triangle_attention_ending_node.value_dim)
+    template_mask = batch['template_pseudo_beta_mask']
+    template_mask_2d = template_mask[:, None] * template_mask[None, :]
+    template_mask_2d = template_mask_2d.astype(dtype)
+
+    template_dgram = dgram_from_positions(batch['template_pseudo_beta'],
+                                          **self.config.dgram_features)
+    template_dgram = template_dgram.astype(dtype)
+
+    to_concat = [template_dgram, template_mask_2d[:, :, None]]
+
+    aatype = jax.nn.one_hot(batch['template_aatype'], 22, axis=-1, dtype=dtype)
+
+    to_concat.append(jnp.tile(aatype[None, :, :], [num_res, 1, 1]))
+    to_concat.append(jnp.tile(aatype[:, None, :], [1, num_res, 1]))
+
+    n, ca, c = [residue_constants.atom_order[a] for a in ('N', 'CA', 'C')]
+    rot, trans = quat_affine.make_transform_from_reference(
+        n_xyz=batch['template_all_atom_positions'][:, n],
+        ca_xyz=batch['template_all_atom_positions'][:, ca],
+        c_xyz=batch['template_all_atom_positions'][:, c])
+    affines = quat_affine.QuatAffine(
+        quaternion=quat_affine.rot_to_quat(rot, unstack_inputs=True),
+        translation=trans,
+        rotation=rot,
+        unstack_inputs=True)
+    points = [jnp.expand_dims(x, axis=-2) for x in affines.translation]
+    affine_vec = affines.invert_point(points, extra_dims=1)
+    inv_distance_scalar = jax.lax.rsqrt(
+        1e-6 + sum([jnp.square(x) for x in affine_vec]))
+
+    # Backbone affine mask: whether the residue has C, CA, N
+    # (the template mask defined above only considers pseudo CB).
+    template_mask = (
+        batch['template_all_atom_masks'][..., n] *
+        batch['template_all_atom_masks'][..., ca] *
+        batch['template_all_atom_masks'][..., c])
+    template_mask_2d = template_mask[:, None] * template_mask[None, :]
+
+    inv_distance_scalar *= template_mask_2d.astype(inv_distance_scalar.dtype)
+
+    unit_vector = [(x * inv_distance_scalar)[..., None] for x in affine_vec]
+
+    unit_vector = [x.astype(dtype) for x in unit_vector]
+    template_mask_2d = template_mask_2d.astype(dtype)
+    if not self.config.use_template_unit_vector:
+      unit_vector = [jnp.zeros_like(x) for x in unit_vector]
+    to_concat.extend(unit_vector)
+
+    to_concat.append(template_mask_2d[..., None])
+
+    act = jnp.concatenate(to_concat, axis=-1)
+
+    # Mask out non-template regions so we don't get arbitrary values in the
+    # distogram for these regions.
+    act *= template_mask_2d[..., None]
+
+    # Jumper et al. (2021) Suppl. Alg. 2 "Inference" line 9
+    act = common_modules.Linear(
+        num_channels,
+        initializer='relu',
+        name='embedding2d')(act)
+
+    # Jumper et al. (2021) Suppl. Alg. 2 "Inference" line 11
+    act = TemplatePairStack(
+        self.config.template_pair_stack, self.global_config)(act, mask_2d, is_training)
+
+    act = hk.LayerNorm([-1], True, True, name='output_layer_norm')(act)
+    return act
+
+
+class TemplateEmbedding(hk.Module):
+  """Embeds a set of templates.
+  Jumper et al. (2021) Suppl. Alg. 2 "Inference" lines 9-12
+  Jumper et al. (2021) Suppl. Alg. 17 "TemplatePointwiseAttention"
+  """
+
+  def __init__(self, config, global_config, name='template_embedding'):
+    super().__init__(name=name)
+    self.config = config
+    self.global_config = global_config
+
+  def __call__(self, query_embedding, template_batch, mask_2d, is_training):
+    """Build TemplateEmbedding module.
+    Arguments:
+      query_embedding: Query pair representation, shape [N_res, N_res, c_z].
+      template_batch: A batch of template features.
+      mask_2d: Padding mask (Note: this doesn't care if a template exists,
+        unlike the template_pseudo_beta_mask).
+      is_training: Whether the module is in training mode.
+    Returns:
+      A template embedding [N_res, N_res, c_z].
+    """
+
+    num_templates = template_batch['template_mask'].shape[0]
+    num_channels = (self.config.template_pair_stack
+                    .triangle_attention_ending_node.value_dim)
+    num_res = query_embedding.shape[0]
+
+    dtype = query_embedding.dtype
+    template_mask = template_batch['template_mask']
+    template_mask = template_mask.astype(dtype)
+
+    query_num_channels = query_embedding.shape[-1]
+
+    # Make sure the weights are shared across templates by constructing the
+    # embedder here.
+    # Jumper et al. (2021) Suppl. Alg. 2 "Inference" lines 9-12
+    template_embedder = SingleTemplateEmbedding(self.config, self.global_config)
+
+    def map_fn(batch):
+      return template_embedder(query_embedding, batch, mask_2d, is_training)
+
+    template_pair_representation = mapping.sharded_map(map_fn, in_axes=0)(template_batch)
+
+    # Cross attend from the query to the templates along the residue
+    # dimension by flattening everything else into the batch dimension.
+    # Jumper et al. (2021) Suppl. Alg. 17 "TemplatePointwiseAttention"
+    flat_query = jnp.reshape(query_embedding,[num_res * num_res, 1, query_num_channels])
+
+    flat_templates = jnp.reshape(
+        jnp.transpose(template_pair_representation, [1, 2, 0, 3]),
+        [num_res * num_res, num_templates, num_channels])
+
+    bias = (1e9 * (template_mask[None, None, None, :] - 1.))
+
+    template_pointwise_attention_module = Attention(
+        self.config.attention, self.global_config, query_num_channels)
+    nonbatched_args = [bias]
+    batched_args = [flat_query, flat_templates]
+
+    embedding = mapping.inference_subbatch(
+        template_pointwise_attention_module,
+        self.config.subbatch_size,
+        batched_args=batched_args,
+        nonbatched_args=nonbatched_args,
+        low_memory=not is_training)
+    embedding = jnp.reshape(embedding,[num_res, num_res, query_num_channels])
+
+    # No gradients if no templates.
+    embedding *= (jnp.sum(template_mask) > 0.).astype(embedding.dtype)
+
+    return embedding
+####################################################################
+####################################################################
