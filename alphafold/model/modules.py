@@ -354,16 +354,18 @@ class AlphaFold(hk.Module):
           is_training=is_training,
           compute_loss=compute_loss,
           ensemble_representations=ensemble_representations)
+    
+    emb_config = self.config.embeddings_and_evoformer
+    prev = {
+        'prev_pos': jnp.zeros([num_residues, residue_constants.atom_type_num, 3]),
+        'prev_msa_first_row': jnp.zeros([num_residues, emb_config.msa_channel]),
+        'prev_pair': jnp.zeros([num_residues, num_residues, emb_config.pair_channel]),
+        'prev_dgram': jnp.zeros([num_residues, num_residues, 64]),
+        'prev_plddt': jnp.zeros([num_residues, 50]),
+        'prev_pae': jnp.zeros([num_residues, num_residues, 64])
+    }
+    
     if self.config.num_recycle:
-      emb_config = self.config.embeddings_and_evoformer
-      prev = {
-          'prev_pos': jnp.zeros([num_residues, residue_constants.atom_type_num, 3]),
-          'prev_msa_first_row': jnp.zeros([num_residues, emb_config.msa_channel]),
-          'prev_pair': jnp.zeros([num_residues, num_residues, emb_config.pair_channel]),
-          'prev_dgram': jnp.zeros([num_residues, num_residues, 64]),
-          'prev_plddt': jnp.zeros([num_residues, 50]),
-          'prev_pae': jnp.zeros([num_residues, num_residues, 64])
-      }
       if 'num_iter_recycling' in batch:
         # Training time: num_iter_recycling is in batch.
         # The value for each ensemble batch is the same, so arbitrarily taking
@@ -405,7 +407,6 @@ class AlphaFold(hk.Module):
         else:
           _, prev = hk.while_loop(lambda x: x[0] < num_iter, body, (0, prev))
     else:
-      prev = {}
       num_iter = 0
 
     ret = do_call(prev=prev, recycle_idx=num_iter)
