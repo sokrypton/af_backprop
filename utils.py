@@ -1,5 +1,8 @@
 import jax
 import jax.numpy as jnp
+import tensorflow as tf
+tf.config.set_visible_devices([], 'GPU')
+
 import numpy as np
 from alphafold.common import protein
 from alphafold.common import residue_constants
