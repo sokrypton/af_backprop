@@ -288,6 +288,7 @@ def save_pdb(outs, filename="tmp.pdb"):
 
 order_restype = {v: k for k, v in residue_constants.restype_order.items()}
 idx_to_resname = dict((v,k) for k,v in residue_constants.resname_to_idx.items())
+template_aa_map = np.eye(20)[[residue_constants.HHBLITS_AA_TO_ID[order_restype[i]] for i in range(20)]].T
 
 ###########################
 # MISC
