@@ -1873,15 +1873,20 @@ class EmbeddingsAndEvoformer(hk.Module):
     # Append num_templ rows to msa_activations with template embeddings.
     # Jumper et al. (2021) Suppl. Alg. 2 "Inference" lines 7-8
     if c.template.enabled and c.template.embed_torsion_angles:
-      num_templ, num_res = batch['template_aatype'].shape
-
-      # Embed the templates aatypes.
-      aatype_one_hot = jax.nn.one_hot(batch['template_aatype'], 22, axis=-1)
+      if jnp.issubdtype(batch['template_aatype'].dtype, jnp.integer):
+        num_templ, num_res = batch['template_aatype'].shape
+        # Embed the templates aatypes.
+        aatype = batch['template_aatype']
+        aatype_one_hot = jax.nn.one_hot(batch['template_aatype'], 22, axis=-1)
+      else:
+        num_templ, num_res, _ = batch['template_aatype'].shape
+        aatype = batch['template_aatype'].argmax(-1)
+        aatype_one_hot = batch['template_aatype']
 
       # Embed the templates aatype, torsion angles and masks.
       # Shape (templates, residues, msa_channels)
       ret = all_atom.atom37_to_torsion_angles(
-          aatype=batch['template_aatype'],
+          aatype=aatype,
           all_atom_pos=batch['template_all_atom_positions'],
           all_atom_mask=batch['template_all_atom_masks'],
           # Ensure consistent behaviour during testing:
@@ -1998,7 +2003,10 @@ class SingleTemplateEmbedding(hk.Module):
 
     to_concat = [template_dgram, template_mask_2d[:, :, None]]
 
-    aatype = jax.nn.one_hot(batch['template_aatype'], 22, axis=-1, dtype=dtype)
+    if jnp.issubdtype(batch['template_aatype'].dtype, jnp.integer):
+      aatype = jax.nn.one_hot(batch['template_aatype'], 22, axis=-1, dtype=dtype)
+    else:
+      aatype = batch['template_aatype']
 
     to_concat.append(jnp.tile(aatype[None, :, :], [num_res, 1, 1]))
     to_concat.append(jnp.tile(aatype[:, None, :], [1, num_res, 1]))
