@@ -303,7 +303,8 @@ class FoldIteration(hk.Module):
                initial_act,
                safe_key=None,
                static_feat_2d=None,
-               aatype=None):
+               aatype=None,
+               scale_rate=1.0):
     c = self.config
 
     if safe_key is None:
@@ -313,7 +314,7 @@ class FoldIteration(hk.Module):
       return prng.safe_dropout(
           tensor=tensor,
           safe_key=safe_key,
-          rate=c.dropout,
+          rate=c.dropout * scale_rate,
           is_deterministic=self.global_config.deterministic,
           is_training=is_training)
 
@@ -451,7 +452,8 @@ def generate_affines(representations, batch, config, global_config,
         sequence_mask=sequence_mask,
         update_affine=True,
         is_training=is_training,
-        aatype=batch['aatype'])
+        aatype=batch['aatype'],
+        scale_rate=batch["scale_rate"])
     outputs.append(output)
 
   output = jax.tree_map(lambda *x: jnp.stack(x), *outputs)
