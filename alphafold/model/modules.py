@@ -1795,11 +1795,14 @@ class EmbeddingsAndEvoformer(hk.Module):
     # Jumper et al. (2021) Suppl. Alg. 5 "one_hot"
     if c.max_relative_feature:
       # Add one-hot-encoded clipped residue distances to the pair activations.
-      if c.custom_relative_features:
+      if "rel_pos" in batch:
         rel_pos = batch['rel_pos']
       else:
-        pos = batch['residue_index']
-        offset = pos[:, None] - pos[None, :]
+        if "offset" in batch:
+          offset = batch['offset']
+        else:
+          pos = batch['residue_index']
+          offset = pos[:, None] - pos[None, :]
         rel_pos = jax.nn.one_hot(
             jnp.clip(
                 offset + c.max_relative_feature,
