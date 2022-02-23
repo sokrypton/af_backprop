@@ -70,6 +70,26 @@ def jnp_rmsd(true, pred, add_dist=False):
     loss = (loss + jnp_rmsdist(true, pred))/2
   return loss
 
+###############
+# weighted rmsd
+###############
+def jnp_kabsch_w(a, b, weights):
+  u, s, vh = jnp.linalg.svd(weights * a.T @ b, full_matrices=False)
+  u = jnp.where(jnp.linalg.det(u @ vh) < 0, u.at[:,-1].set(-u[:,-1]), u)
+  return u @ vh
+
+def jnp_rmsd_w(true, pred, weights):
+  p = true - (true * weights[:,None]).sum(0,keepdims=True)/weights.sum()
+  q = pred - (pred * weights[:,None]).sum(0,keepdims=True)/weights.sum()
+  p = p @ jnp_kabsch_w(p, q, weights)
+  return jnp.sqrt((weights*jnp.square(p-q).sum(-1)).sum()/weights.sum() + 1e-8)
+
+def get_rmsd_loss_w(batch, outputs):
+  weights = batch["all_atom_mask"][:,1]
+  true = batch["all_atom_positions"][:,1,:]
+  pred = outputs["structure_module"]["final_atom_positions"][:,1,:]
+  return jnp_rmsd_w(true, pred, weights)
+
 ####################
 # confidence metrics
 ####################
