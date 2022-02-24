@@ -366,6 +366,13 @@ class AlphaFold(hk.Module):
         'prev_plddt': jnp.zeros([num_residues, 50]),
         'prev_pae': jnp.zeros([num_residues, num_residues, 64])
     }
+
+    if "init_pos" in batch:
+      prev['prev_pos'] = batch["init_pos"][0]
+    if "init_msa_first_row" in batch:
+      prev['prev_msa_first_row'] = batch["init_msa_first_row"][0]
+    if "init_pair" in batch:
+      prev['prev_pair'] = batch["init_pair"][0]
     
     if self.config.num_recycle:
       if 'num_iter_recycling' in batch:
