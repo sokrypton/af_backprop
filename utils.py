@@ -84,11 +84,23 @@ def jnp_rmsd_w(true, pred, weights):
   p = p @ jnp_kabsch_w(p, q, weights)
   return jnp.sqrt((weights*jnp.square(p-q).sum(-1)).sum()/weights.sum() + 1e-8)
 
-def get_rmsd_loss_w(batch, outputs):
+def get_rmsd_loss_w(batch, outputs, copies=1):
   weights = batch["all_atom_mask"][:,1]
   true = batch["all_atom_positions"][:,1,:]
   pred = outputs["structure_module"]["final_atom_positions"][:,1,:]
-  return jnp_rmsd_w(true, pred, weights)
+  if copies == 1:
+    return jnp_rmsd_w(true, pred, weights)
+  else:
+    # TODO add support for weights
+    I = copies - 1
+    L = true.shape[0] // copies
+    p = true - true[:L].mean(0)
+    q = pred - pred[:L].mean(0)
+    p = p @ jnp_kabsch_w(p[:L], q[:L], jnp.ones(L))
+    rm = jnp.square(p[:L]-q[:L]).sum(-1).mean()
+    p,q = p[L:].reshape(I,1,L,-1),q[L:].reshape(1,I,L,-1)
+    rm += jnp.square(p-q).sum(-1).mean(-1).min(-1).sum()
+    return jnp.sqrt(rm / copies)
 
 ####################
 # confidence metrics
@@ -117,19 +129,46 @@ def get_rmsd_loss(batch, outputs):
   pred = outputs["structure_module"]["final_atom_positions"][:,1,:]
   return jnp_rmsd(true, pred)
 
-def get_dgram_loss(batch, outputs, model_config, logits=None):
-  # get cb-cb features (ca in case of glycine)
+def _distogram_log_loss(logits, bin_edges, batch, num_bins, copies=1):
+  """Log loss of a distogram."""
+  pos,mask = batch['pseudo_beta'],batch['pseudo_beta_mask']
+  sq_breaks = jnp.square(bin_edges)
+  dist2 = jnp.square(pos[:,None] - pos[None,:]).sum(-1,keepdims=True)
+  true_bins = jnp.sum(dist2 > sq_breaks, axis=-1)
+  true = jax.nn.one_hot(true_bins, num_bins)
+
+  if copies == 1:
+    errors = -(true * jax.nn.log_softmax(logits)).sum(-1)
+    sq_mask = mask[:,None] * mask[None,:]
+    avg_error = (errors * sq_mask).sum()/(1e-6 + sq_mask.sum())
+    return avg_error
+  else:
+    # TODO add support for masks
+    L = pos.shape[0] // copies
+    I = copies - 1
+    true_, pred_ = true[:L,:L], logits[:L,:L]
+    errors = -(true_ * jax.nn.log_softmax(pred_)).sum(-1)
+    avg_error = errors.mean()
+
+    true_, pred_ = true[:L,L:], logits[:L,L:]
+    true_, pred_ = true_.reshape(L,I,1,L,-1), pred_.reshape(L,1,I,L,-1)
+    errors = -(true_ * jax.nn.log_softmax(pred_)).sum(-1)
+    avg_error += errors.mean((0,-1)).min(-1).sum()
+
+    return avg_error / copies
+
+def get_dgram_loss(batch, outputs, model_config, logits=None, copies=1):
+  # get cb features (ca in case of glycine)
   pb, pb_mask = model.modules.pseudo_beta_fn(batch["aatype"],
                                              batch["all_atom_positions"],
                                              batch["all_atom_mask"])
-  
-  if logits is None: 
-    logits = outputs["distogram"]["logits"]
-  dgram_loss = model.modules._distogram_log_loss(logits,
-                                                 outputs["distogram"]["bin_edges"],
-                                                 batch={"pseudo_beta":pb,"pseudo_beta_mask":pb_mask},
-                                                 num_bins=model_config.model.heads.distogram.num_bins)
-  return dgram_loss["loss"]
+  if logits is None: logits = outputs["distogram"]["logits"]
+  dgram_loss = _distogram_log_loss(logits,
+                                   outputs["distogram"]["bin_edges"],
+                                   batch={"pseudo_beta":pb,"pseudo_beta_mask":pb_mask},
+                                   num_bins=model_config.model.heads.distogram.num_bins,
+                                   copies=copies)
+  return dgram_loss
 
 def get_fape_loss(batch, outputs, model_config, use_clamped_fape=False):
   sub_batch = jax.tree_map(lambda x: x, batch)
