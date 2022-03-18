@@ -1777,8 +1777,7 @@ class EmbeddingsAndEvoformer(hk.Module):
                                    **self.config.prev_pos,
                                    backprop=self.config.backprop_dgram)
       pair_activations += common_modules.Linear(
-          c.pair_channel, name='prev_pos_linear')(
-              dgram)
+          c.pair_channel, name='prev_pos_linear')(dgram)
 
     if c.recycle_features:
       if 'prev_msa_first_row' in batch:
@@ -1908,10 +1907,8 @@ class EmbeddingsAndEvoformer(hk.Module):
 
       template_features = jnp.concatenate([
           aatype_one_hot,
-          jnp.reshape(
-              ret['torsion_angles_sin_cos'], [num_templ, num_res, 14]),
-          jnp.reshape(
-              ret['alt_torsion_angles_sin_cos'], [num_templ, num_res, 14]),
+          jnp.reshape(ret['torsion_angles_sin_cos'], [num_templ, num_res, 14]),
+          jnp.reshape(ret['alt_torsion_angles_sin_cos'], [num_templ, num_res, 14]),
           ret['torsion_angles_mask']], axis=-1)
 
       template_activations = common_modules.Linear(
@@ -1925,8 +1922,8 @@ class EmbeddingsAndEvoformer(hk.Module):
           name='template_projection')(template_activations)
 
       # Concatenate the templates to the msa.
-      evoformer_input['msa'] = jnp.concatenate(
-          [evoformer_input['msa'], template_activations], axis=0)
+      evoformer_input['msa'] = jnp.concatenate([evoformer_input['msa'], template_activations], axis=0)
+      
       # Concatenate templates masks to the msa masks.
       # Use mask from the psi angle, as it only depends on the backbone atoms
       # from a single residue.
@@ -1955,17 +1952,14 @@ class EmbeddingsAndEvoformer(hk.Module):
     if gc.use_remat:
       evoformer_fn = hk.remat(evoformer_fn)
 
-    evoformer_stack = layer_stack.layer_stack(c.evoformer_num_block)(
-        evoformer_fn)
-    evoformer_output, safe_key = evoformer_stack(
-        (evoformer_input, safe_key))
+    evoformer_stack = layer_stack.layer_stack(c.evoformer_num_block)(evoformer_fn)
+    evoformer_output, safe_key = evoformer_stack((evoformer_input, safe_key))
 
     msa_activations = evoformer_output['msa']
     pair_activations = evoformer_output['pair']
 
     single_activations = common_modules.Linear(
-        c.seq_channel, name='single_activations')(
-            msa_activations[0])
+        c.seq_channel, name='single_activations')(msa_activations[0])
 
     num_sequences = batch['msa_feat'].shape[0]
     output = {
@@ -2011,8 +2005,11 @@ class SingleTemplateEmbedding(hk.Module):
     template_mask_2d = template_mask[:, None] * template_mask[None, :]
     template_mask_2d = template_mask_2d.astype(dtype)
 
-    template_dgram = dgram_from_positions(batch['template_pseudo_beta'],
-                                          **self.config.dgram_features)
+    if "template_dgram" in batch:
+      template_dgram = batch["template_dgram"]
+    else:
+      template_dgram = dgram_from_positions(batch['template_pseudo_beta'],
+                                            **self.config.dgram_features)
     template_dgram = template_dgram.astype(dtype)
 
     to_concat = [template_dgram, template_mask_2d[:, :, None]]
@@ -2025,39 +2022,38 @@ class SingleTemplateEmbedding(hk.Module):
     to_concat.append(jnp.tile(aatype[None, :, :], [num_res, 1, 1]))
     to_concat.append(jnp.tile(aatype[:, None, :], [1, num_res, 1]))
 
-    n, ca, c = [residue_constants.atom_order[a] for a in ('N', 'CA', 'C')]
-    rot, trans = quat_affine.make_transform_from_reference(
-        n_xyz=batch['template_all_atom_positions'][:, n],
-        ca_xyz=batch['template_all_atom_positions'][:, ca],
-        c_xyz=batch['template_all_atom_positions'][:, c])
-    affines = quat_affine.QuatAffine(
-        quaternion=quat_affine.rot_to_quat(rot, unstack_inputs=True),
-        translation=trans,
-        rotation=rot,
-        unstack_inputs=True)
-    points = [jnp.expand_dims(x, axis=-2) for x in affines.translation]
-    affine_vec = affines.invert_point(points, extra_dims=1)
-    inv_distance_scalar = jax.lax.rsqrt(
-        1e-6 + sum([jnp.square(x) for x in affine_vec]))
-
     # Backbone affine mask: whether the residue has C, CA, N
     # (the template mask defined above only considers pseudo CB).
+    n, ca, c = [residue_constants.atom_order[a] for a in ('N', 'CA', 'C')]
     template_mask = (
         batch['template_all_atom_masks'][..., n] *
         batch['template_all_atom_masks'][..., ca] *
         batch['template_all_atom_masks'][..., c])
     template_mask_2d = template_mask[:, None] * template_mask[None, :]
 
-    inv_distance_scalar *= template_mask_2d.astype(inv_distance_scalar.dtype)
-
-    unit_vector = [(x * inv_distance_scalar)[..., None] for x in affine_vec]
-
+    # compute unit_vector (not used by default)
+    if self.config.use_template_unit_vector:
+      rot, trans = quat_affine.make_transform_from_reference(
+          n_xyz=batch['template_all_atom_positions'][:, n],
+          ca_xyz=batch['template_all_atom_positions'][:, ca],
+          c_xyz=batch['template_all_atom_positions'][:, c])
+      affines = quat_affine.QuatAffine(
+          quaternion=quat_affine.rot_to_quat(rot, unstack_inputs=True),
+          translation=trans,
+          rotation=rot,
+          unstack_inputs=True)
+      points = [jnp.expand_dims(x, axis=-2) for x in affines.translation]
+      affine_vec = affines.invert_point(points, extra_dims=1)
+      inv_distance_scalar = jax.lax.rsqrt(1e-6 + sum([jnp.square(x) for x in affine_vec]))
+      inv_distance_scalar *= template_mask_2d.astype(inv_distance_scalar.dtype)
+      unit_vector = [(x * inv_distance_scalar)[..., None] for x in affine_vec]
+    else:      
+      unit_vector = [jnp.zeros((num_res,num_res,1))] * 3
+      
     unit_vector = [x.astype(dtype) for x in unit_vector]
-    template_mask_2d = template_mask_2d.astype(dtype)
-    if not self.config.use_template_unit_vector:
-      unit_vector = [jnp.zeros_like(x) for x in unit_vector]
     to_concat.extend(unit_vector)
 
+    template_mask_2d = template_mask_2d.astype(dtype)
     to_concat.append(template_mask_2d[..., None])
 
     act = jnp.concatenate(to_concat, axis=-1)
