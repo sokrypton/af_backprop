@@ -260,6 +260,7 @@ CONFIG = ml_collections.ConfigDict({
             },
             'recycle_features': True,
             'recycle_pos': True,
+            'recycle_dgram': False,
             'backprop_dgram': False,
             'seq_channel': 384,
             'template': {
