@@ -373,6 +373,8 @@ class AlphaFold(hk.Module):
       prev['prev_msa_first_row'] = batch["init_msa_first_row"][0]
     if "init_pair" in batch:
       prev['prev_pair'] = batch["init_pair"][0]
+    if "init_dgram" in batch:
+      prev['prev_dgram'] = batch["init_dgram"][0]
     
     if self.config.num_recycle:
       if 'num_iter_recycling' in batch:
@@ -1773,9 +1775,15 @@ class EmbeddingsAndEvoformer(hk.Module):
     # Jumper et al. (2021) Suppl. Alg. 32 "RecyclingEmbedder"
     if c.recycle_pos and 'prev_pos' in batch:
       prev_pseudo_beta = pseudo_beta_fn(batch['aatype'], batch['prev_pos'], None)
-      dgram = dgram_from_positions(prev_pseudo_beta,
-                                   **self.config.prev_pos,
-                                   backprop=self.config.backprop_dgram)
+      dgram = dgram_from_positions(prev_pseudo_beta, **c.prev_pos,
+                                    backprop=c.backprop_dgram)
+      pair_activations += common_modules.Linear(
+          c.pair_channel, name='prev_pos_linear')(dgram)
+          
+    if c.recycle_dgram and 'prev_dgram' in batch:
+      dgram = jax.nn.softmax(batch["prev_dgram"])
+      dgram_map = jax.nn.one_hot(jnp.repeat(jnp.append(0,jnp.arange(15)),4),15).at[0].set(0)
+      dgram = dgram @ dgram_map
       pair_activations += common_modules.Linear(
           c.pair_channel, name='prev_pos_linear')(dgram)
 
