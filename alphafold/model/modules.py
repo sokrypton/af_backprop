@@ -1782,7 +1782,7 @@ class EmbeddingsAndEvoformer(hk.Module):
           
     if c.recycle_dgram and 'prev_dgram' in batch:
       dgram = jax.nn.softmax(batch["prev_dgram"])
-      dgram_map = jax.nn.one_hot(jnp.repeat(jnp.append(0,jnp.arange(15)),4),15).at[0].set(0)
+      dgram_map = jax.nn.one_hot(jnp.repeat(jnp.append(0,jnp.arange(15)),4),15).at[:,0].set(0)
       dgram = dgram @ dgram_map
       pair_activations += common_modules.Linear(
           c.pair_channel, name='prev_pos_linear')(dgram)
