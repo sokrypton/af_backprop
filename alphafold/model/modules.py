@@ -1574,7 +1574,7 @@ def dgram_from_positions_soft(positions, num_bins, min_bin, max_bin, temp=2.0):
   '''soft positions to dgram converter'''
   lower_breaks = jnp.append(-1e8,jnp.linspace(min_bin, max_bin, num_bins))
   upper_breaks = jnp.append(lower_breaks[1:],1e8)
-  dist = jnp.sqrt(jnp.square(pos[...,:,None,:] - pos[...,None,:,:]).sum(-1,keepdims=True) + 1e-8)
+  dist = jnp.sqrt(jnp.square(positions[...,:,None,:] - positions[...,None,:,:]).sum(-1,keepdims=True) + 1e-8)
   o = jax.nn.sigmoid((dist - lower_breaks)/temp) * jax.nn.sigmoid((upper_breaks - dist)/temp)
   o = o/(o.sum(-1,keepdims=True) + 1e-8)
   return o[...,1:]
