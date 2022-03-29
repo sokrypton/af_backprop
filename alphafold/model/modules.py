@@ -332,7 +332,7 @@ class AlphaFold(hk.Module):
       else:
         stop_list = ["prev_pos","prev_msa_first_row","prev_pair"]
         new_prev.update({k:jax.lax.stop_gradient(new_prev[k]) for k in stop_list})
-        return new_prev #return jax.tree_map(jax.lax.stop_gradient, new_prev)
+        return new_prev
 
     def do_call(prev,
                 recycle_idx,
@@ -1545,8 +1545,7 @@ class OuterProductMean(hk.Module):
 
     return act
 
-
-def dgram_from_positions(positions, num_bins, min_bin, max_bin, backprop=False):
+def dgram_from_positions(positions, num_bins, min_bin, max_bin):
   """Compute distogram from amino acid positions.
   Arguments:
     positions: [N_res, 3] Position coordinates.
@@ -1557,26 +1556,28 @@ def dgram_from_positions(positions, num_bins, min_bin, max_bin, backprop=False):
   Returns:
     Distogram with the specified number of bins.
   """
-
   def squared_difference(x, y):
     return jnp.square(x - y)
 
   lower_breaks = jnp.linspace(min_bin, max_bin, num_bins)
   lower_breaks = jnp.square(lower_breaks)
-  upper_breaks = jnp.concatenate([lower_breaks[1:],
-                                  jnp.array([1e8], dtype=jnp.float32)], axis=-1)
+  upper_breaks = jnp.concatenate([lower_breaks[1:],jnp.array([1e8], dtype=jnp.float32)], axis=-1)
   dist2 = jnp.sum(
       squared_difference(
           jnp.expand_dims(positions, axis=-2),
           jnp.expand_dims(positions, axis=-3)),
       axis=-1, keepdims=True)
 
-  if backprop:
-    dgram = jax.nn.sigmoid((dist2 - lower_breaks)) * jax.nn.sigmoid((upper_breaks - dist2))
-  else:
-    dgram = ((dist2 > lower_breaks).astype(jnp.float32) * (dist2 < upper_breaks).astype(jnp.float32))
-  return dgram
+  return ((dist2 > lower_breaks).astype(jnp.float32) * (dist2 < upper_breaks).astype(jnp.float32))
 
+def dgram_from_positions_soft(positions, num_bins, min_bin, max_bin, temp=2.0):
+  '''soft positions to dgram converter'''
+  lower_breaks = jnp.append(-1e8,jnp.linspace(min_bin, max_bin, num_bins))
+  upper_breaks = jnp.append(lower_breaks[1:],1e8)
+  dist = jnp.sqrt(jnp.square(pos[...,:,None,:] - pos[...,None,:,:]).sum(-1,keepdims=True) + 1e-8)
+  o = jax.nn.sigmoid((dist - lower_breaks)/temp) * jax.nn.sigmoid((upper_breaks - dist)/temp)
+  o = o/(o.sum(-1,keepdims=True) + 1e-8)
+  return o[...,1:]
 
 def pseudo_beta_fn(aatype, all_atom_positions, all_atom_masks):
   """Create pseudo beta features."""
@@ -1775,10 +1776,11 @@ class EmbeddingsAndEvoformer(hk.Module):
     # Jumper et al. (2021) Suppl. Alg. 32 "RecyclingEmbedder"
     if c.recycle_pos and 'prev_pos' in batch:
       prev_pseudo_beta = pseudo_beta_fn(batch['aatype'], batch['prev_pos'], None)
-      dgram = dgram_from_positions(prev_pseudo_beta, **c.prev_pos,
-                                    backprop=c.backprop_dgram)
-      pair_activations += common_modules.Linear(
-          c.pair_channel, name='prev_pos_linear')(dgram)
+      if c.backprop_dgram:
+        dgram = dgram_from_positions_soft(prev_pseudo_beta, temp=c.backprop_dgram_temp, **c.prev_pos)
+      else:
+        dgram = dgram_from_positions(prev_pseudo_beta, **c.prev_pos)
+      pair_activations += common_modules.Linear(c.pair_channel, name='prev_pos_linear')(dgram)
           
     if c.recycle_dgram and 'prev_dgram' in batch:
       dgram = jax.nn.softmax(batch["prev_dgram"])
@@ -2015,8 +2017,13 @@ class SingleTemplateEmbedding(hk.Module):
     if "template_dgram" in batch:
       template_dgram = batch["template_dgram"]
     else:
-      template_dgram = dgram_from_positions(batch['template_pseudo_beta'],
-                                            **self.config.dgram_features)
+      if self.config.backprop_dgram:
+        template_dgram = dgram_from_positions_soft(batch['template_pseudo_beta'],
+                                                   temp=self.config.backprop_dgram_temp,
+                                                   **self.config.dgram_features)
+      else:
+        template_dgram = dgram_from_positions(batch['template_pseudo_beta'],
+                                              **self.config.dgram_features)
     template_dgram = template_dgram.astype(dtype)
 
     to_concat = [template_dgram, template_mask_2d[:, :, None]]
