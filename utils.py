@@ -215,60 +215,55 @@ def get_fape_loss_idx(batch, outputs, idx, model_config, backbone=False, sidecha
 
   return loss["loss"]
 
+def get_sc_rmsd(true_pos, pred_pos, aa_ident, atoms_to_exclude=None):
+
+  if atoms_to_exclude is None:
+    atoms_to_exclude = ["N","CA","C","O"]
+
+  def kabsch(a, b):
+    u, s, vh = jnp.linalg.svd(a.T @ b, full_matrices=False)
+    return jnp.where(jnp.linalg.det(u @ vh) < 0, u.at[:,-1].set(-u[:,-1]), u) @ vh
+  
+  # collect atom indices
+  idx,idx_alt = [],[]
+  for n,a in enumerate(aa_ident):
+    aa = idx_to_resname[a]
+    atoms = set(residue_constants.residue_atoms[aa])
+    atoms14 = residue_constants.restype_name_to_atom14_names[aa]
+    swaps = residue_constants.residue_atom_renaming_swaps.get(aa,{})
+    swaps.update({v:k for k,v in swaps.items()})
+    for atom in atoms.difference(atoms_to_exclude):
+      idx.append(n * 14 + atoms14.index(atom))
+      if atom in swaps:
+        idx_alt.append(n * 14 + atoms14.index(swaps[atom]))
+      else:
+        idx_alt.append(idx[-1])
+  idx, idx_alt = np.asarray(idx), np.asarray(idx_alt)
+
+  # select atoms
+  T, P = true_pos.reshape(-1,3)[idx], pred_pos.reshape(-1,3)[idx]
+
+  # select non-ambigious atoms
+  non_amb = idx == idx_alt
+  t, p = T[non_amb], P[non_amb]
+
+  # align non-ambigious atoms
+  aln = kabsch(t-t.mean(0), p-p.mean(0))
+  T,P = (T-t.mean(0)) @ aln, P-p.mean(0)
+  P_alt = pred_pos.reshape(-1,3)[idx_alt]-p.mean(0)
+
+  # compute rmsd
+  msd = jnp.minimum(jnp.square(T-P).sum(-1),jnp.square(T-P_alt).sum(-1)).mean()
+  return jnp.sqrt(msd + 1e-8)
+
 def get_sidechain_rmsd_idx(batch, outputs, idx, model_config, include_ca=False):
   idx_ref = batch["idx"]
-  bb_atoms_to_exclude = ["N","O"] if include_ca else ["N","CA","O"]
-
-  def kabsch(P, Q):
-    V, S, W = jnp.linalg.svd(P.T @ Q, full_matrices=False)
-    flip = jax.nn.sigmoid(-10 * jnp.linalg.det(V) * jnp.linalg.det(W))
-    S = flip * S.at[-1].set(-S[-1]) + (1-flip) * S
-    V = flip * V.at[:,-1].set(-V[:,-1]) + (1-flip) * V
-    return V@W
-
   true_aa_idx = batch["aatype"][idx_ref]
   true_pos = all_atom.atom37_to_atom14(batch["all_atom_positions"],batch)[idx_ref,:,:]
   pred_pos = outputs["structure_module"]["final_atom14_positions"][idx,:,:]
-
-  i,j,j_alt = [],[],[]
-  i_non,j_non = [],[]
-  for n,aa_idx in enumerate(true_aa_idx):
-    aa = idx_to_resname[aa_idx]
-    atoms = residue_constants.residue_atoms[aa].copy()
-    for atom in atoms:
-      if atom not in bb_atoms_to_exclude:
-        i.append(n)
-        j.append(residue_constants.restype_name_to_atom14_names[aa].index(atom))
-        if aa in residue_constants.residue_atom_renaming_swaps:
-          swaps = residue_constants.residue_atom_renaming_swaps[aa]
-          swaps_rev = {v:k for k,v in swaps.items()}
-          if atom in swaps:
-            j_alt.append(residue_constants.restype_name_to_atom14_names[aa].index(swaps[atom]))
-          elif atom in swaps_rev:
-            j_alt.append(residue_constants.restype_name_to_atom14_names[aa].index(swaps_rev[atom]))
-          else:
-            j_alt.append(j[-1])
-            i_non.append(i[-1])
-            j_non.append(j[-1])
-        else:
-          j_alt.append(j[-1])
-          i_non.append(i[-1])
-          j_non.append(j[-1])
-
-  # align non-ambigious atoms
-  true_pos_non = true_pos[i_non,j_non,:]  
-  pred_pos_non = pred_pos[i_non,j_non,:]
-  true_pos = (true_pos - true_pos_non.mean(0)) @ kabsch(true_pos_non - true_pos_non.mean(0), pred_pos_non - pred_pos_non.mean(0))
-  pred_pos = pred_pos - pred_pos_non.mean(0)
-
-  true_pos_a = true_pos[i,j,:]
-  pred_pos_a = pred_pos[i,j,:]
-  pred_pos_b = pred_pos[i,j_alt,:]
-
-  rms_a = jnp.square(true_pos_a - pred_pos_a).sum(-1)
-  rms_b = jnp.square(true_pos_a - pred_pos_b).sum(-1)
-
-  return jnp.sqrt(jnp.minimum(rms_a,rms_b).mean() + 1e-8)
+  bb_atoms_to_exclude = ["N","C","O"] if include_ca else ["N","CA","C","O"]
+  
+  return get_sc_rmsd(true_pos, pred_pos, true_aa_idx, bb_atoms_to_exclude)
 
 ####################
 # update sequence
