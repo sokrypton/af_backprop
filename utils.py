@@ -57,14 +57,12 @@ def jnp_rmsd(true, pred, add_dist=False):
 # weighted rmsd
 ###############
 def jnp_kabsch_w(a, b, weights):
-  u, s, vh = jnp.linalg.svd(weights * a.T @ b, full_matrices=False)
-  u = jnp.where(jnp.linalg.det(u @ vh) < 0, u.at[:,-1].set(-u[:,-1]), u)
-  return u @ vh
+  return _np_kabsch(a * weights[:,None], b)
 
 def jnp_rmsd_w(true, pred, weights):
   p = true - (true * weights[:,None]).sum(0,keepdims=True)/weights.sum()
   q = pred - (pred * weights[:,None]).sum(0,keepdims=True)/weights.sum()
-  p = p @ jnp_kabsch_w(p, q, weights)
+  p = p @ _np_kabsch(p * weights[:,None], q)
   return jnp.sqrt((weights*jnp.square(p-q).sum(-1)).sum()/weights.sum() + 1e-8)
 
 def get_rmsd_loss_w(batch, outputs, copies=1):
@@ -79,7 +77,7 @@ def get_rmsd_loss_w(batch, outputs, copies=1):
     L = true.shape[0] // copies
     p = true - true[:L].mean(0)
     q = pred - pred[:L].mean(0)
-    p = p @ jnp_kabsch_w(p[:L], q[:L], jnp.ones(L))
+    p = p @ _np_kabsch(p[:L], q[:L])
     rm = jnp.square(p[:L]-q[:L]).sum(-1).mean()
     p,q = p[L:].reshape(I,1,L,-1),q[L:].reshape(1,I,L,-1)
     rm += jnp.square(p-q).sum(-1).mean(-1).min(-1).sum()
@@ -249,10 +247,10 @@ def get_sidechain_rmsd_idx(batch, outputs, idx, model_config, include_ca=True):
 def _np_kabsch(a, b, use_jax=True):
   if use_jax:
     u, s, vh = jnp.linalg.svd(a.T @ b, full_matrices=False)
-    return jnp.where(jnp.linalg.det(u @ vh) < 0, u.at[:,-1].set(-u[:,-1]), u) @ vh
+    return jnp.where(jnp.linalg.det(u @ vh) < 0, u.at[:,-1].multiply(-1.0), u) @ vh
   else:
     u, s, vh = np.linalg.svd(a.T @ b, full_matrices=False)
-    if np.linalg.det(u @ vh) < 0: u[:,-1] *= -1
+    if np.linalg.det(u @ vh) < 0: u[:,-1] *= -1.0
     return u @ vh
 
 def _np_len_pw(x, use_jax=True):
