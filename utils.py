@@ -243,7 +243,31 @@ def get_sidechain_rmsd_idx(batch, outputs, idx, model_config, include_ca=True):
 #################################################################################
 #################################################################################
 #################################################################################
+
+def _np_len_pw(x, use_jax=True):
+  '''compute pairwise distance'''
+  _np = jnp if use_jax else np
+
+  x_norm = _np.square(x).sum(-1)
+  xx = _np.einsum("...ia,...ja->...ij",x,x)
+  sq_dist = x_norm[...,:,None] + x_norm[...,None,:] - 2 * xx
+
+  # due to precision errors the values can sometimes be negative
+  if use_jax: sq_dist = jax.nn.relu(sq_dist)
+  else: sq_dist[sq_dist < 0] = 0
+
+  # return euclidean pairwise distance matrix
+  return _np.sqrt(sq_dist + 1e-8)
+
+def _np_rmsdist(true, pred, use_jax=True):
+  '''compute RMSD of distance matrices'''
+  _np = jnp if use_jax else np
+  t = _np_len_pw(true, use_jax=use_jax)
+  p = _np_len_pw(pred, use_jax=use_jax)
+  return _np.sqrt(_np.square(t-p).mean() + 1e-8)
+
 def _np_kabsch(a, b, use_jax=True):
+  '''get alignment matrix for two sets of coodinates'''
   if use_jax:
     u, s, vh = jnp.linalg.svd(a.T @ b, full_matrices=False)
     return jnp.where(jnp.linalg.det(u @ vh) < 0, u.at[:,-1].multiply(-1.0), u) @ vh
@@ -252,21 +276,8 @@ def _np_kabsch(a, b, use_jax=True):
     if np.linalg.det(u @ vh) < 0: u[:,-1] *= -1.0
     return u @ vh
 
-def _np_len_pw(x, use_jax=True):
-  _np = jnp if use_jax else np
-  x_norm = _np.square(x).sum(-1)
-  sq_dist = x_norm[:,None] + x_norm[None,:] - 2 * x @ x.T
-  if use_jax: sq_dist = jax.nn.relu(sq_dist)
-  else: sq_dist[sq_dist < 0] = 0
-  return _np.sqrt(sq_dist + 1e-8)
-
-def _np_rmsdist(true, pred, use_jax=True):
-  _np = jnp if use_jax else np
-  t = _np_len_pw(true, use_jax=use_jax)
-  p = _np_len_pw(pred, use_jax=use_jax)
-  return _np.sqrt(_np.square(t-p).mean() + 1e-8)
-
 def _np_rmsd(true, pred, use_jax=True):
+  '''compute RMSD of coordinates after alignment'''
   _np = jnp if use_jax else np
   p = true - true.mean(0,keepdims=True)
   q = pred - pred.mean(0,keepdims=True)
@@ -274,6 +285,7 @@ def _np_rmsd(true, pred, use_jax=True):
   return _np.sqrt(_np.square(p-q).sum(-1).mean() + 1e-8)
 
 def _np_norm(x, axis=-1, keepdims=True, eps=1e-8, use_jax=True):
+  '''compute norm of vector'''
   _np = jnp if use_jax else np
   return _np.sqrt(_np.square(x).sum(axis,keepdims=keepdims) + 1e-8)
   
@@ -282,12 +294,14 @@ def _np_len(a, b, use_jax=True):
   return _np_norm(a-b, use_jax=use_jax)
 
 def _np_ang(a, b, c, use_acos=False, use_jax=True):
+  '''given coordinates a-b-c, return angle'''  
   _np = jnp if use_jax else np
   norm = lambda x: _np_norm(x, use_jax=use_jax)
   ba, bc = b-a, b-c
-  vals = (ba * bc).sum(-1,keepdims=True) / (norm(ba) * norm(bc))
-  if use_acos: return _np.arccos(vals)
-  else: return vals
+  cos_ang = (ba * bc).sum(-1,keepdims=True) / (norm(ba) * norm(bc))
+  # note the derivative at acos(-1 or 1) is inf, to avoid nans we use cos(ang)
+  if use_acos: return _np.arccos(cos_ang)
+  else: return cos_ang
   
 def _np_dih(a, b, c, d, use_atan2=False, standardize=False, use_jax=True):
   '''given coordinates a-b-c-d, return dihedral'''
@@ -305,8 +319,11 @@ def _np_dih(a, b, c, d, use_atan2=False, standardize=False, use_jax=True):
     else: return angs
 
 def _np_extend(a,b,c, L,A,D, use_jax=True):
-  ''' given 3 coords (a,b,c), (L)ength, (A)ngle, and (D)ihedral
-  return 4th coord '''
+  '''
+  given coordinates a-b-c,
+  c-d (L)ength, b-c-d (A)ngle, and a-b-c-d (D)ihedral
+  return 4th coordinate d
+  '''
   _np = jnp if use_jax else np
   normalize = lambda x: x/_np_norm(x, use_jax=use_jax)
   bc = normalize(b-c)
@@ -315,23 +332,30 @@ def _np_extend(a,b,c, L,A,D, use_jax=True):
                   L * _np.sin(A) * _np.cos(D) * _np.cross(n, bc),
                   L * _np.sin(A) * _np.sin(D) * -n])
 
-def _np_get_cb(all_atom_positions, all_atom_mask=None, use_jax=True):
-  atom_idx = {k:residue_constants.atom_order[k] for k in ["N","CA","C"]}
-  o = {k:all_atom_positions[...,i,:] for k,i in atom_idx.items()}
-  o["CB"] = _np_extend(o["C"], o["N"], o["CA"], 1.522, 1.927, -2.143, use_jax=use_jax)
-  if all_atom_mask is not None:
-    idx = np.fromiter(atom_idx.values(),int)
-    o["CB_mask"] = all_atom_mask[...,idx].prod(-1)
-  return o
+def _np_get_cb(N,CA,C, use_jax=True):
+  '''compute CB placement from N, CA, C'''
+  return _np_extend(C, N, CA, 1.522, 1.927, -2.143, use_jax=use_jax)
   
 def _np_get_6D(all_atom_positions, all_atom_mask=None, use_jax=True):
-  out = _np_get_cb(all_atom_positions, all_atom_mask, use_jax=use_jax)
-  N,CA,CB = (out[k] for k in ["N","CA","CB"])
+  '''get 6D features (see TrRosetta paper)'''
+
+  # get CB coordinate
+  atom_idx = {k:residue_constants.atom_order[k] for k in ["N","CA","C"]}
+  out = {k:all_atom_positions[...,i,:] for k,i in atom_idx.items()}
+  out["CB"] = _np_get_cb(**out, use_jax=use_jax)
+  
+  if all_atom_mask is not None:
+    idx = np.fromiter(atom_idx.values(),int)
+    out["CB_mask"] = all_atom_mask[...,idx].prod(-1)
+
+  # get pairwise features
+  N,A,B = (out[k] for k in ["N","CA","CB"])
   j = {"use_jax":use_jax}
-  out.update({"dist":  _np_len(CB[...,:,None,:], CB[...,None,:,:], **j),
-              "omega": _np_dih(CA[...,:,None,:], CB[...,:,None,:], CB[...,None,:,:], CA[...,None,:,:], **j),
-              "theta": _np_dih( N[...,:,None,:], CA[...,:,None,:], CB[...,:,None,:], CB[...,None,:,:], **j),
-              "phi":   _np_ang(CA[...,:,None,:], CB[...,:,None,:], CB[...,None,:,:], **j)})
+  out.update({"dist":  _np_len_pw(B,**j),
+              "phi":   _np_ang(A[...,:,None,:],B[...,:,None,:],B[...,None,:,:],**j),
+              "omega": _np_dih(A[...,:,None,:],B[...,:,None,:],B[...,None,:,:],A[...,None,:,:],**j),
+              "theta": _np_dih(N[...,:,None,:],A[...,:,None,:],B[...,:,None,:],B[...,None,:,:],**j),
+              })
   return out
 
 ####################
