@@ -14,7 +14,6 @@ from alphafold.model.tf import shape_placeholders
 #######################
 # reshape inputs
 #######################
-
 def make_fixed_size(feat, model_runner, length, batch_axis=True):
   '''pad input features'''
   cfg = model_runner.config
@@ -49,26 +48,10 @@ def make_fixed_size(feat, model_runner, length, batch_axis=True):
 # rmsd
 #########################
 def jnp_rmsdist(true, pred):
-  def pw_dist(a):
-    a_norm = jnp.square(a).sum(-1)
-    return jnp.sqrt(jax.nn.relu(a_norm[:,None] + a_norm[None,:] - 2 * a @ a.T) + 1e-8)
-  return jnp.sqrt(jnp.square(pw_dist(true)-pw_dist(pred)).mean() + 1e-8)
+  return _np_rmsdist(true, pred)
 
 def jnp_rmsd(true, pred, add_dist=False):
-  def kabsch(P, Q):
-    V, S, W = jnp.linalg.svd(P.T @ Q, full_matrices=False)
-    flip = jax.nn.sigmoid(-10 * jnp.linalg.det(V) * jnp.linalg.det(W))
-    S = flip * S.at[-1].set(-S[-1]) + (1-flip) * S
-    V = flip * V.at[:,-1].set(-V[:,-1]) + (1-flip) * V
-    return V@W
-
-  p = true - true.mean(0,keepdims=True)
-  q = pred - pred.mean(0,keepdims=True)
-  p = p @ kabsch(p,q)
-  loss = jnp.sqrt(jnp.square(p-q).sum(-1).mean() + 1e-8)
-  if add_dist:
-    loss = (loss + jnp_rmsdist(true, pred))/2
-  return loss
+  return _np_rmsd(true, pred, add_dist=add_dist)
 
 ###############
 # weighted rmsd
@@ -127,7 +110,7 @@ def get_pae(outputs):
 def get_rmsd_loss(batch, outputs):
   true = batch["all_atom_positions"][:,1,:]
   pred = outputs["structure_module"]["final_atom_positions"][:,1,:]
-  return jnp_rmsd(true, pred)
+  return _np_rmsd(true,pred)
 
 def _distogram_log_loss(logits, bin_edges, batch, num_bins, copies=1):
   """Log loss of a distogram."""
@@ -217,12 +200,7 @@ def get_fape_loss_idx(batch, outputs, idx, model_config, backbone=False, sidecha
 
 def get_sc_rmsd(true_pos, pred_pos, aa_ident, atoms_to_exclude=None):
 
-  if atoms_to_exclude is None:
-    atoms_to_exclude = ["N","CA","C","O"]
-
-  def kabsch(a, b):
-    u, s, vh = jnp.linalg.svd(a.T @ b, full_matrices=False)
-    return jnp.where(jnp.linalg.det(u @ vh) < 0, u.at[:,-1].set(-u[:,-1]), u) @ vh
+  if atoms_to_exclude is None: atoms_to_exclude = ["N","C","O"]
   
   # collect atom indices
   idx,idx_alt = [],[]
@@ -248,7 +226,7 @@ def get_sc_rmsd(true_pos, pred_pos, aa_ident, atoms_to_exclude=None):
   t, p = T[non_amb], P[non_amb]
 
   # align non-ambigious atoms
-  aln = kabsch(t-t.mean(0), p-p.mean(0))
+  aln = _np_kabsch(t-t.mean(0), p-p.mean(0))
   T,P = (T-t.mean(0)) @ aln, P-p.mean(0)
   P_alt = pred_pos.reshape(-1,3)[idx_alt]-p.mean(0)
 
@@ -256,7 +234,7 @@ def get_sc_rmsd(true_pos, pred_pos, aa_ident, atoms_to_exclude=None):
   msd = jnp.minimum(jnp.square(T-P).sum(-1),jnp.square(T-P_alt).sum(-1)).mean()
   return jnp.sqrt(msd + 1e-8)
 
-def get_sidechain_rmsd_idx(batch, outputs, idx, model_config, include_ca=False):
+def get_sidechain_rmsd_idx(batch, outputs, idx, model_config, include_ca=True):
   idx_ref = batch["idx"]
   true_aa_idx = batch["aatype"][idx_ref]
   true_pos = all_atom.atom37_to_atom14(batch["all_atom_positions"],batch)[idx_ref,:,:]
@@ -264,6 +242,134 @@ def get_sidechain_rmsd_idx(batch, outputs, idx, model_config, include_ca=False):
   bb_atoms_to_exclude = ["N","C","O"] if include_ca else ["N","CA","C","O"]
   
   return get_sc_rmsd(true_pos, pred_pos, true_aa_idx, bb_atoms_to_exclude)
+
+#################################################################################
+#################################################################################
+#################################################################################
+def _np_kabsch(a, b, use_jax=True):
+  if use_jax:
+    u, s, vh = jnp.linalg.svd(a.T @ b, full_matrices=False)
+    return jnp.where(jnp.linalg.det(u @ vh) < 0, u.at[:,-1].set(-u[:,-1]), u) @ vh
+  else:
+    u, s, vh = np.linalg.svd(a.T @ b, full_matrices=False)
+    if np.linalg.det(u @ vh) < 0: u[:,-1] *= -1
+    return u @ vh
+
+def _np_len_pw(x, use_jax=True):
+  _np = jnp if use_jax else np
+  x_norm = _np.square(x).sum(-1)
+  sq_dist = x_norm[:,None] + x_norm[None,:] - 2 * x @ x.T
+  if use_jax: sq_dist = jax.nn.relu(sq_dist)
+  else: sq_dist[sq_dist < 0] = 0
+  return _np.sqrt(sq_dist + 1e-8)
+
+def _np_rmsdist(true, pred, use_jax=True):
+  _np = jnp if use_jax else np
+  t = _np_len_pw(true, use_jax=use_jax)
+  p = _np_len_pw(pred, use_jax=use_jax)
+  return _np.sqrt(_np.square(t-p).mean() + 1e-8)
+
+def _np_rmsd(true, pred, add_dist=False, use_jax=True):
+  _np = jnp if use_jax else np
+  p = true - true.mean(0,keepdims=True)
+  q = pred - pred.mean(0,keepdims=True)
+  p = p @ _np_kabsch(p, q, use_jax=use_jax)
+  loss = _np.sqrt(_np.square(p-q).sum(-1).mean() + 1e-8)
+  if add_dist:
+    loss = (loss + _np_rmsdist(true, pred, use_jax=use_jax))/2
+  return loss
+
+def _np_norm(x, axis=-1, keepdims=True, eps=1e-8, use_jax=True):
+  _np = jnp if use_jax else np
+  return _np.sqrt(_np.square(x).sum(axis,keepdims=keepdims) + 1e-8)
+  
+def _np_len(a, b, use_jax=True):
+  '''given coordinates a-b, return length or distance'''
+  return _np_norm(a-b, use_jax=use_jax)
+
+def _np_ang(a, b, c, use_acos=False, use_jax=True):
+  _np = jnp if use_jax else np
+  norm = lambda x: _np_norm(x, use_jax=use_jax)
+  ba, bc = b-a, b-c
+  vals = (ba * bc).sum(-1,keepdims=True) / (norm(ba) * norm(bc))
+  if use_acos: return _np.arccos(vals)
+  else: return vals
+  
+def _np_dih(a, b, c, d, use_atan2=False, standardize=False, use_jax=True):
+  '''given coordinates a-b-c-d, return dihedral'''
+  _np = jnp if use_jax else np
+  normalize = lambda x: x/_np_norm(x, use_jax=use_jax)
+  ab, bc, cd = normalize(a-b), normalize(b-c), normalize(c-d)
+  n1,n2 = _np.cross(ab, bc), _np.cross(bc, cd)
+  sin_ang = (_np.cross(n1, bc) * n2).sum(-1,keepdims=True)
+  cos_ang = (n1 * n2).sum(-1,keepdims=True)
+  if use_atan2:
+    return _np.arctan2(sin_ang, cos_ang)
+  else:
+    angs = _np.concatenate([sin_ang, cos_ang],-1)
+    if standardize: return normalize(angs)
+    else: return angs
+
+def _np_extend(a, b, c, L,A,D, use_jax=True):
+  ''' given 3 coords (a,b,c), (L)ength, (A)ngle, and (D)ihedral, return 4th coord '''
+  _np = jnp if use_jax else np
+  normalize = lambda x: x/_np_norm(x, use_jax=use_jax)
+  bc = normalize(b-c)
+  n = normalize(_np.cross(b-a, bc))
+  return c + sum([L * _np.cos(A) * bc,
+                  L * _np.sin(A) * _np.cos(D) * _np.cross(n, bc),
+                  L * _np.sin(A) * _np.sin(D) * -n])
+
+def _np_get_cb(all_atom_positions, all_atom_mask=None, use_jax=True):
+  atom_idx = {k:residue_constants.atom_order[k] for k in ["N","CA","C"]}
+  o = {k:all_atom_positions[...,i,:] for k,i in atom_idx.items()}
+  o["CB"] = _np_extend(o["C"], o["N"], o["CA"], 1.522, 1.927, -2.143, use_jax=use_jax)
+  if all_atom_mask is not None:
+    idx = np.fromiter(atom_idx.values(),int)
+    o["CB_mask"] = all_atom_mask[...,idx].prod(-1)
+  return o
+  
+def _np_get_6D(all_atom_positions, all_atom_mask=None, use_jax=True):
+  out = _np_get_cb(all_atom_positions, all_atom_mask, use_jax=use_jax)
+  N,CA,CB = (out[k] for k in ["N","CA","CB"])
+  j = {"use_jax":use_jax}
+  out.update({"dist":  _np_len(CB[...,:,None,:], CB[...,None,:,:], **j),
+              "omega": _np_dih(CA[...,:,None,:], CB[...,:,None,:], CB[...,None,:,:], CA[...,None,:,:], **j),
+              "theta": _np_dih( N[...,:,None,:], CA[...,:,None,:], CB[...,:,None,:], CB[...,None,:,:], **j),
+              "phi":   _np_ang(CA[...,:,None,:], CB[...,:,None,:], CB[...,None,:,:], **j)})
+  return out
+
+####################
+# 6D loss (see TrRosetta paper)
+####################
+def _np_get_6D_loss(true, pred, mask=None, use_theta=True, use_dist=False, use_jax=True):
+  _np = jnp if use_jax else np
+
+  f = {"T":_np_get_6D(true, mask, use_jax=use_jax),
+       "P":_np_get_6D(pred, use_jax=use_jax)}
+
+  for k in f: f[k]["dist"] /= 10.0
+
+  keys = ["omega","phi"]
+  if use_theta: keys.append("theta")
+  if use_dist: keys.append("dist")
+  sq_diff = sum([_np.square(f["T"][k]-f["P"][k]).sum(-1) for k in keys])
+
+  mask = _np.ones(true.shape[0]) if mask is None else f["T"]["CB_mask"]
+  mask = mask[:,None] * mask[None,:]
+  loss = (sq_diff * mask).sum((-1,-2)) / mask.sum((-1,-2))
+
+  return _np.sqrt(loss + 1e-8).mean()
+  
+def get_6D_loss(batch, outputs, **kwargs):
+  true = batch["all_atom_positions"]
+  pred = outputs["structure_module"]["final_atom_positions"]
+  mask = batch["all_atom_mask"]
+  return _np_get_6D_loss(true, pred, mask, **kwargs)
+
+#################################################################################
+#################################################################################
+#################################################################################
 
 ####################
 # update sequence
@@ -308,18 +414,6 @@ def update_aatype(aatype, inputs):
 ####################
 # utils
 ####################
-def set_dropout(model_config, dropout=0.0):
-  model_config.model.embeddings_and_evoformer.evoformer.msa_row_attention_with_pair_bias.dropout_rate = dropout
-  model_config.model.embeddings_and_evoformer.evoformer.triangle_attention_ending_node.dropout_rate = dropout
-  model_config.model.embeddings_and_evoformer.evoformer.triangle_attention_starting_node.dropout_rate = dropout
-  model_config.model.embeddings_and_evoformer.evoformer.triangle_multiplication_incoming.dropout_rate = dropout
-  model_config.model.embeddings_and_evoformer.evoformer.triangle_multiplication_outgoing.dropout_rate = dropout
-  model_config.model.embeddings_and_evoformer.template.template_pair_stack.triangle_attention_ending_node.dropout_rate = dropout
-  model_config.model.embeddings_and_evoformer.template.template_pair_stack.triangle_attention_starting_node.dropout_rate = dropout
-  model_config.model.embeddings_and_evoformer.template.template_pair_stack.triangle_multiplication_incoming.dropout_rate = dropout
-  model_config.model.embeddings_and_evoformer.template.template_pair_stack.triangle_multiplication_outgoing.dropout_rate = dropout
-  model_config.model.heads.structure_module.dropout = dropout
-  return model_config
 
 def pdb_to_string(pdb_file):
   lines = []
@@ -360,3 +454,19 @@ jalview_color_list = {"Clustal":           ["#80a0f0","#f01505","#00ff00","#c048
                       "Turn Propensity":   ["#2cd3d3","#708f8f","#ff0000","#e81717","#a85757","#3fc0c0","#778888","#ff0000","#708f8f","#00ffff","#1ce3e3","#7e8181","#1ee1e1","#1ee1e1","#f60909","#e11e1e","#738c8c","#738c8c","#9d6262","#07f8f8","#f30c0c","#7c8383","#5ba4a4"],
                       "Buried Index":      ["#00a35c","#00fc03","#00eb14","#00eb14","#0000ff","#00f10e","#00f10e","#009d62","#00d52a","#0054ab","#007b84","#00ff00","#009768","#008778","#00e01f","#00d52a","#00db24","#00a857","#00e619","#005fa0","#00eb14","#00b649","#00f10e"]}
 
+
+###########################
+# to be deprecated functions
+###########################
+def set_dropout(model_config, dropout=0.0):
+  model_config.model.embeddings_and_evoformer.evoformer.msa_row_attention_with_pair_bias.dropout_rate = dropout
+  model_config.model.embeddings_and_evoformer.evoformer.triangle_attention_ending_node.dropout_rate = dropout
+  model_config.model.embeddings_and_evoformer.evoformer.triangle_attention_starting_node.dropout_rate = dropout
+  model_config.model.embeddings_and_evoformer.evoformer.triangle_multiplication_incoming.dropout_rate = dropout
+  model_config.model.embeddings_and_evoformer.evoformer.triangle_multiplication_outgoing.dropout_rate = dropout
+  model_config.model.embeddings_and_evoformer.template.template_pair_stack.triangle_attention_ending_node.dropout_rate = dropout
+  model_config.model.embeddings_and_evoformer.template.template_pair_stack.triangle_attention_starting_node.dropout_rate = dropout
+  model_config.model.embeddings_and_evoformer.template.template_pair_stack.triangle_multiplication_incoming.dropout_rate = dropout
+  model_config.model.embeddings_and_evoformer.template.template_pair_stack.triangle_multiplication_outgoing.dropout_rate = dropout
+  model_config.model.heads.structure_module.dropout = dropout
+  return model_config
