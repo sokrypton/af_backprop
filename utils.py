@@ -51,11 +51,10 @@ def jnp_rmsdist(true, pred):
   return _np_rmsdist(true, pred)
 
 def jnp_rmsd(true, pred, add_dist=False):
-  return _np_rmsd(true, pred, add_dist=add_dist)
+  rmsd = _np_rmsd(true, pred)
+  if add_dist: rmsd = (rmsd + _np_rmsdist(true, pred))/2
+  return rmsd
 
-###############
-# weighted rmsd
-###############
 def jnp_kabsch_w(a, b, weights):
   return _np_kabsch(a * weights[:,None], b)
 
@@ -267,15 +266,12 @@ def _np_rmsdist(true, pred, use_jax=True):
   p = _np_len_pw(pred, use_jax=use_jax)
   return _np.sqrt(_np.square(t-p).mean() + 1e-8)
 
-def _np_rmsd(true, pred, add_dist=False, use_jax=True):
+def _np_rmsd(true, pred, use_jax=True):
   _np = jnp if use_jax else np
   p = true - true.mean(0,keepdims=True)
   q = pred - pred.mean(0,keepdims=True)
   p = p @ _np_kabsch(p, q, use_jax=use_jax)
-  loss = _np.sqrt(_np.square(p-q).sum(-1).mean() + 1e-8)
-  if add_dist:
-    loss = (loss + _np_rmsdist(true, pred, use_jax=use_jax))/2
-  return loss
+  return _np.sqrt(_np.square(p-q).sum(-1).mean() + 1e-8)
 
 def _np_norm(x, axis=-1, keepdims=True, eps=1e-8, use_jax=True):
   _np = jnp if use_jax else np
@@ -308,8 +304,9 @@ def _np_dih(a, b, c, d, use_atan2=False, standardize=False, use_jax=True):
     if standardize: return normalize(angs)
     else: return angs
 
-def _np_extend(a, b, c, L,A,D, use_jax=True):
-  ''' given 3 coords (a,b,c), (L)ength, (A)ngle, and (D)ihedral, return 4th coord '''
+def _np_extend(a,b,c, L,A,D, use_jax=True):
+  ''' given 3 coords (a,b,c), (L)ength, (A)ngle, and (D)ihedral
+  return 4th coord '''
   _np = jnp if use_jax else np
   normalize = lambda x: x/_np_norm(x, use_jax=use_jax)
   bc = normalize(b-c)
