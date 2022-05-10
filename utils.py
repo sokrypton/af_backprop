@@ -266,23 +266,24 @@ def _np_rmsdist(true, pred, use_jax=True):
   p = _np_len_pw(pred, use_jax=use_jax)
   return _np.sqrt(_np.square(t-p).mean() + 1e-8)
 
-def _np_kabsch(a, b, use_jax=True):
+def _np_kabsch(a, b, return_v=False, use_jax=True):
   '''get alignment matrix for two sets of coodinates'''
-  if use_jax:
-    u, s, vh = jnp.linalg.svd(a.T @ b, full_matrices=False)
-    return jnp.where(jnp.linalg.det(u @ vh) < 0, u.at[:,-1].multiply(-1.0), u) @ vh
-  else:
-    u, s, vh = np.linalg.svd(a.T @ b, full_matrices=False)
-    if np.linalg.det(u @ vh) < 0: u[:,-1] *= -1.0
-    return u @ vh
+  _np = jnp if use_jax else np
+  ab = a.swapaxes(-1,-2) @ b
+  u, s, vh = _np.linalg.svd(ab, full_matrices=False)
+  flip = _np.linalg.det(u @ vh) < 0
+  u_ = _np.where(flip, -u[...,-1].T, u[...,-1].T).T
+  if use_jax: u = u.at[...,-1].set(u_)
+  else: u[...,-1] = u_
+  return u if return_v else (u @ vh)
 
 def _np_rmsd(true, pred, use_jax=True):
   '''compute RMSD of coordinates after alignment'''
   _np = jnp if use_jax else np
-  p = true - true.mean(0,keepdims=True)
-  q = pred - pred.mean(0,keepdims=True)
+  p = true - true.mean(-2,keepdims=True)
+  q = pred - pred.mean(-2,keepdims=True)
   p = p @ _np_kabsch(p, q, use_jax=use_jax)
-  return _np.sqrt(_np.square(p-q).sum(-1).mean() + 1e-8)
+  return _np.sqrt(_np.square(p-q).sum(-1).mean(-1) + 1e-8)
 
 def _np_norm(x, axis=-1, keepdims=True, eps=1e-8, use_jax=True):
   '''compute norm of vector'''
