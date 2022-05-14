@@ -7,7 +7,7 @@ setup(
         'absl-py',
         'biopython',
         'chex',
-        'dm-haiku==0.0.5',
+        'dm-haiku',
         'dm-tree',
         'docker',
         'immutabledict',
