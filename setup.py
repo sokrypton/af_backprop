@@ -16,6 +16,6 @@ setup(
         'numpy',
         'pandas',
         'scipy',
-        'tensorflow-cpu',
+        'tensorflow',
     ],
 )
