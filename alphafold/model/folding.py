@@ -379,7 +379,7 @@ class FoldIteration(hk.Module):
 
     outputs = {'affine': affine.to_tensor(), 'sc': sc}
 
-    affine = affine.apply_rotation_tensor_fn(jax.lax.stop_gradient)
+    # affine = affine.apply_rotation_tensor_fn(jax.lax.stop_gradient)
 
     new_activations = {
         'act': act,
