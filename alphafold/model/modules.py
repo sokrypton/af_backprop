@@ -31,6 +31,8 @@ import haiku as hk
 import jax
 import jax.numpy as jnp
 
+from alphafold.model.r3 import Rigids, Rots, Vecs
+
 
 def softmax_cross_entropy(logits, labels):
   """Computes softmax cross entropy given logits and one-hot class labels."""
@@ -198,28 +200,26 @@ class AlphaFoldIteration(hk.Module):
     representations['msa'] = msa_representation
     batch = batch0  # We are not ensembled from here on.
     
-    if self.config.use_struct:
-      kill_heads = []
+    if jnp.issubdtype(ensembled_batch['aatype'].dtype, jnp.integer):
+      _, num_residues = ensembled_batch['aatype'].shape
     else:
-      kill_heads = ["structure_module","predicted_lddt","predicted_aligned_error"]
+      _, num_residues, _ = ensembled_batch['aatype'].shape
       
     heads = {}
     for head_name, head_config in sorted(self.config.heads.items()):
-      if head_name not in kill_heads:
-        if not head_config.weight:
-          continue  # Do not instantiate zero-weight heads.
-
-        head_factory = {
-            'masked_msa': MaskedMsaHead,
-            'distogram': DistogramHead,
-            'structure_module': functools.partial(
-                folding.StructureModule, compute_loss=compute_loss),
-            'predicted_lddt': PredictedLDDTHead,
-            'predicted_aligned_error': PredictedAlignedErrorHead,
-            'experimentally_resolved': ExperimentallyResolvedHead,
-        }[head_name]
-        heads[head_name] = (head_config,
-                            head_factory(head_config, self.global_config))
+      if not head_config.weight:
+        continue  # Do not instantiate zero-weight heads.
+      head_factory = {
+          'masked_msa': MaskedMsaHead,
+          'distogram': DistogramHead,
+          'structure_module': functools.partial(
+              folding.StructureModule, compute_loss=compute_loss),
+          'predicted_lddt': PredictedLDDTHead,
+          'predicted_aligned_error': PredictedAlignedErrorHead,
+          'experimentally_resolved': ExperimentallyResolvedHead,
+      }[head_name]
+      heads[head_name] = (head_config,
+                          head_factory(head_config, self.global_config))
 
     total_loss = 0.
     ret = {}
@@ -241,15 +241,18 @@ class AlphaFoldIteration(hk.Module):
       if name in ('predicted_lddt', 'predicted_aligned_error'):
         continue
       else:
-        ret[name] = module(representations, batch, is_training)
-        if 'representations' in ret[name]:
-          # Extra representations from the head. Used by the structure module
-          # to provide activations for the PredictedLDDTHead.
-          representations.update(ret[name].pop('representations'))
+        if name == "structure_module" and not self.config.use_struct:
+          _ = module(representations, batch, is_training)
+        else:
+          ret[name] = module(representations, batch, is_training)
+          if 'representations' in ret[name]:
+            # Extra representations from the head. Used by the structure module
+            # to provide activations for the PredictedLDDTHead.
+            representations.update(ret[name].pop('representations'))
       if compute_loss:
         total_loss += loss(module, head_config, ret, name)
 
-    if self.config.global_config.use_struct:
+    if self.config.use_struct:
       if self.config.heads.get('predicted_lddt.weight', 0.0):
         # Add PredictedLDDTHead after StructureModule executes.
         name = 'predicted_lddt'
@@ -353,15 +356,14 @@ class AlphaFold(hk.Module):
       else:
         num_ensemble = batch_size
         ensembled_batch = batch
-
       non_ensembled_batch = jax.tree_map(lambda x: x, prev)
+      
+      return impl(ensembled_batch=ensembled_batch,
+                  non_ensembled_batch=non_ensembled_batch,
+                  is_training=is_training,
+                  compute_loss=compute_loss,
+                  ensemble_representations=ensemble_representations)
 
-      return impl(
-          ensembled_batch=ensembled_batch,
-          non_ensembled_batch=non_ensembled_batch,
-          is_training=is_training,
-          compute_loss=compute_loss,
-          ensemble_representations=ensemble_representations)
     
     emb_config = self.config.embeddings_and_evoformer
     prev = {
@@ -404,15 +406,18 @@ class AlphaFold(hk.Module):
           if self.config.add_prev:
             p_ = add_prev(p, p_)
           return p_, None
+
         if hk.running_init():
           prev,_ = body(prev, 0)
         else:
           prev,_ = hk.scan(body, prev, jnp.arange(num_iter))
+
       else:
         def body(x):
           i,p = x[0],x[1]
           p_ = get_prev(do_call(p, recycle_idx=i, compute_loss=False))
           return x[0]+1, p_
+
         if hk.running_init():
           # When initializing the Haiku module, run one iteration of the
           # while_loop to initialize the Haiku modules used in `body`.
