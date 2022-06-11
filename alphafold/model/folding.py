@@ -442,22 +442,22 @@ def generate_affines(representations, batch, config, global_config,
           representations['pair'])
 
   
-  def fold_iter(act, sub_key):
+  def fold_iter(act,_):
     act, out = fold_iteration(
         act,
         initial_act=initial_act,
         static_feat_2d=act_2d,
-        safe_key=sub_key,
+        safe_key=safe_key,
         sequence_mask=sequence_mask,
         update_affine=True,
         is_training=is_training,
         aatype=batch['aatype'],
         scale_rate=batch["scale_rate"])
     return act, out
-  safe_keys = safe_key.split(c.num_layer)
-  activations, output = jax.lax.scan(fold_iter, activations, safe_keys)
+  activations, output = hk.scan(fold_iter, activations, xs=None, length=c.num_layer)
   
   '''
+  #safe_keys = safe_key.split(c.num_layer)
   outputs = []
   for sub_key in safe_keys:
     activations, output = fold_iteration(
