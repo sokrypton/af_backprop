@@ -204,6 +204,11 @@ class AlphaFoldIteration(hk.Module):
       _, num_residues = ensembled_batch['aatype'].shape
     else:
       _, num_residues, _ = ensembled_batch['aatype'].shape
+
+    if self.config.use_struct:
+      struct_module = folding.StructureModule
+    else:
+      struct_module = folding.dummy
       
     heads = {}
     for head_name, head_config in sorted(self.config.heads.items()):
@@ -212,8 +217,7 @@ class AlphaFoldIteration(hk.Module):
       head_factory = {
           'masked_msa': MaskedMsaHead,
           'distogram': DistogramHead,
-          'structure_module': functools.partial(
-              folding.StructureModule, compute_loss=compute_loss),
+          'structure_module': functools.partial(struct_module, compute_loss=compute_loss),
           'predicted_lddt': PredictedLDDTHead,
           'predicted_aligned_error': PredictedAlignedErrorHead,
           'experimentally_resolved': ExperimentallyResolvedHead,
@@ -241,14 +245,11 @@ class AlphaFoldIteration(hk.Module):
       if name in ('predicted_lddt', 'predicted_aligned_error'):
         continue
       else:
-        if name == "structure_module" and not self.config.use_struct:
-          _ = module(representations, batch, is_training)
-        else:
-          ret[name] = module(representations, batch, is_training)
-          if 'representations' in ret[name]:
-            # Extra representations from the head. Used by the structure module
-            # to provide activations for the PredictedLDDTHead.
-            representations.update(ret[name].pop('representations'))
+        ret[name] = module(representations, batch, is_training)
+        if 'representations' in ret[name]:
+          # Extra representations from the head. Used by the structure module
+          # to provide activations for the PredictedLDDTHead.
+          representations.update(ret[name].pop('representations'))
       if compute_loss:
         total_loss += loss(module, head_config, ret, name)
 
