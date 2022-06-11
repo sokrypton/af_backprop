@@ -197,23 +197,29 @@ class AlphaFoldIteration(hk.Module):
 
     representations['msa'] = msa_representation
     batch = batch0  # We are not ensembled from here on.
-
+    
+    if self.config.use_struct:
+      kill_heads = []
+    else:
+      kill_heads = ["structure_module","predicted_lddt","predicted_aligned_error"]
+      
     heads = {}
     for head_name, head_config in sorted(self.config.heads.items()):
-      if not head_config.weight:
-        continue  # Do not instantiate zero-weight heads.
+      if head_name not in kill_heads:
+        if not head_config.weight:
+          continue  # Do not instantiate zero-weight heads.
 
-      head_factory = {
-          'masked_msa': MaskedMsaHead,
-          'distogram': DistogramHead,
-          'structure_module': functools.partial(
-              folding.StructureModule, compute_loss=compute_loss),
-          'predicted_lddt': PredictedLDDTHead,
-          'predicted_aligned_error': PredictedAlignedErrorHead,
-          'experimentally_resolved': ExperimentallyResolvedHead,
-      }[head_name]
-      heads[head_name] = (head_config,
-                          head_factory(head_config, self.global_config))
+        head_factory = {
+            'masked_msa': MaskedMsaHead,
+            'distogram': DistogramHead,
+            'structure_module': functools.partial(
+                folding.StructureModule, compute_loss=compute_loss),
+            'predicted_lddt': PredictedLDDTHead,
+            'predicted_aligned_error': PredictedAlignedErrorHead,
+            'experimentally_resolved': ExperimentallyResolvedHead,
+        }[head_name]
+        heads[head_name] = (head_config,
+                            head_factory(head_config, self.global_config))
 
     total_loss = 0.
     ret = {}
@@ -243,30 +249,30 @@ class AlphaFoldIteration(hk.Module):
       if compute_loss:
         total_loss += loss(module, head_config, ret, name)
 
-    if self.config.heads.get('predicted_lddt.weight', 0.0):
-      # Add PredictedLDDTHead after StructureModule executes.
-      name = 'predicted_lddt'
-      # Feed all previous results to give access to structure_module result.
-      head_config, module = heads[name]
-      ret[name] = module(representations, batch, is_training)
-      if compute_loss:
-        total_loss += loss(module, head_config, ret, name, filter_ret=False)
+    if self.config.global_config.use_struct:
+      if self.config.heads.get('predicted_lddt.weight', 0.0):
+        # Add PredictedLDDTHead after StructureModule executes.
+        name = 'predicted_lddt'
+        # Feed all previous results to give access to structure_module result.
+        head_config, module = heads[name]
+        ret[name] = module(representations, batch, is_training)
+        if compute_loss:
+          total_loss += loss(module, head_config, ret, name, filter_ret=False)
 
-    if ('predicted_aligned_error' in self.config.heads
-        and self.config.heads.get('predicted_aligned_error.weight', 0.0)):
-      # Add PredictedAlignedErrorHead after StructureModule executes.
-      name = 'predicted_aligned_error'
-      # Feed all previous results to give access to structure_module result.
-      head_config, module = heads[name]
-      ret[name] = module(representations, batch, is_training)
-      if compute_loss:
-        total_loss += loss(module, head_config, ret, name, filter_ret=False)
+      if ('predicted_aligned_error' in self.config.heads
+          and self.config.heads.get('predicted_aligned_error.weight', 0.0)):
+        # Add PredictedAlignedErrorHead after StructureModule executes.
+        name = 'predicted_aligned_error'
+        # Feed all previous results to give access to structure_module result.
+        head_config, module = heads[name]
+        ret[name] = module(representations, batch, is_training)
+        if compute_loss:
+          total_loss += loss(module, head_config, ret, name, filter_ret=False)
 
     if compute_loss:
       return ret, total_loss
     else:
       return ret
-
 
 class AlphaFold(hk.Module):
   """AlphaFold model with recycling.
@@ -316,23 +322,23 @@ class AlphaFold(hk.Module):
 
     def get_prev(ret):
       new_prev = {
-          'prev_pos':ret['structure_module']['final_atom_positions'],
           'prev_msa_first_row': ret['representations']['msa_first_row'],
           'prev_pair': ret['representations']['pair'],
           'prev_dgram': ret["distogram"]["logits"],
-          'prev_plddt': ret["predicted_lddt"]["logits"],
       }
-      if "predicted_aligned_error" in ret:
-        new_prev["prev_pae"] = ret["predicted_aligned_error"]["logits"]
-      else:
-        new_prev["prev_pae"] = jnp.zeros_like(new_prev['prev_dgram'])
-
-      if self.config.backprop_recycle:
-        return new_prev
-      else:
-        stop_list = ["prev_pos","prev_msa_first_row","prev_pair"]
-        new_prev.update({k:jax.lax.stop_gradient(new_prev[k]) for k in stop_list})
-        return new_prev
+      if self.config.use_struct:
+        new_prev.update({'prev_pos': ret['structure_module']['final_atom_positions'],
+                         'prev_plddt': ret["predicted_lddt"]["logits"]})
+        
+        if "predicted_aligned_error" in ret:
+          new_prev["prev_pae"] = ret["predicted_aligned_error"]["logits"]
+          
+      if not self.config.backprop_recycle:
+        for k in ["prev_pos","prev_msa_first_row","prev_pair"]:
+          if k in new_prev:
+            new_prev[k] = jax.lax.stop_gradient(new_prev[k])
+      
+      return new_prev
 
     def do_call(prev,
                 recycle_idx,
@@ -359,22 +365,17 @@ class AlphaFold(hk.Module):
     
     emb_config = self.config.embeddings_and_evoformer
     prev = {
-        'prev_pos': jnp.zeros([num_residues, residue_constants.atom_type_num, 3]),
         'prev_msa_first_row': jnp.zeros([num_residues, emb_config.msa_channel]),
         'prev_pair': jnp.zeros([num_residues, num_residues, emb_config.pair_channel]),
         'prev_dgram': jnp.zeros([num_residues, num_residues, 64]),
-        'prev_plddt': jnp.zeros([num_residues, 50]),
-        'prev_pae': jnp.zeros([num_residues, num_residues, 64])
     }
+    if self.config.use_struct:
+      prev.update({'prev_pos': jnp.zeros([num_residues, residue_constants.atom_type_num, 3]),
+                   'prev_plddt': jnp.zeros([num_residues, 50]),
+                   'prev_pae': jnp.zeros([num_residues, num_residues, 64])})
 
-    if "init_pos" in batch:
-      prev['prev_pos'] = batch["init_pos"][0]
-    if "init_msa_first_row" in batch:
-      prev['prev_msa_first_row'] = batch["init_msa_first_row"][0]
-    if "init_pair" in batch:
-      prev['prev_pair'] = batch["init_pair"][0]
-    if "init_dgram" in batch:
-      prev['prev_dgram'] = batch["init_dgram"][0]
+    for k in ["pos","msa_first_row","pair","dgram"]:
+      if f"init_{k}" in batch: prev[f"prev_{k}"] = batch[f"init_{k}"][0]
     
     if self.config.num_recycle:
       if 'num_iter_recycling' in batch:
@@ -392,8 +393,9 @@ class AlphaFold(hk.Module):
       
       def add_prev(p,p_):
         p_["prev_dgram"] += p["prev_dgram"]
-        p_["prev_plddt"] += p["prev_plddt"]
-        p_["prev_pae"] += p["prev_pae"]
+        if self.config.use_struct:
+          p_["prev_plddt"] += p["prev_plddt"]
+          p_["prev_pae"] += p["prev_pae"]
         return p_
 
       if self.config.add_prev or self.config.backprop_recycle:
@@ -432,9 +434,10 @@ class AlphaFold(hk.Module):
     if self.config.add_prev and num_iter > 0:
       prev_ = add_prev(prev, prev_)
       ret["distogram"]["logits"] = prev_["prev_dgram"]/(num_iter+1)
-      ret["predicted_lddt"]["logits"] = prev_["prev_plddt"]/(num_iter+1)
-      if "predicted_aligned_error" in ret:
-        ret["predicted_aligned_error"]["logits"] = prev_["prev_pae"]/(num_iter+1)
+      if self.config.use_struct:
+        ret["predicted_lddt"]["logits"] = prev_["prev_plddt"]/(num_iter+1)
+        if "predicted_aligned_error" in ret:
+          ret["predicted_aligned_error"]["logits"] = prev_["prev_pae"]/(num_iter+1)
 
     return ret
 
