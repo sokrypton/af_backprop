@@ -331,7 +331,8 @@ CONFIG = ml_collections.ConfigDict({
             'deterministic': False,
             'subbatch_size': 4,
             'use_remat': False,
-            'zero_init': True
+            'zero_init': True,
+            'use_struct': True
         },
         'heads': {
             'distogram': {
