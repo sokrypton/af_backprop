@@ -1783,20 +1783,22 @@ class EmbeddingsAndEvoformer(hk.Module):
     # Inject previous outputs for recycling.
     # Jumper et al. (2021) Suppl. Alg. 2 "Inference" line 6
     # Jumper et al. (2021) Suppl. Alg. 32 "RecyclingEmbedder"
-    if c.recycle_pos and 'prev_pos' in batch:
+    
+    if "prev_pos" in batch:
+      # use predicted position input
       prev_pseudo_beta = pseudo_beta_fn(batch['aatype'], batch['prev_pos'], None)
       if c.backprop_dgram:
         dgram = dgram_from_positions_soft(prev_pseudo_beta, temp=c.backprop_dgram_temp, **c.prev_pos)
       else:
         dgram = dgram_from_positions(prev_pseudo_beta, **c.prev_pos)
-      pair_activations += common_modules.Linear(c.pair_channel, name='prev_pos_linear')(dgram)
-          
-    if c.recycle_dgram and 'prev_dgram' in batch:
+    
+    elif 'prev_dgram' in batch:
+      # use predicted distogram input (from Sergey)
       dgram = jax.nn.softmax(batch["prev_dgram"])
       dgram_map = jax.nn.one_hot(jnp.repeat(jnp.append(0,jnp.arange(15)),4),15).at[:,0].set(0)
       dgram = dgram @ dgram_map
-      pair_activations += common_modules.Linear(
-          c.pair_channel, name='prev_pos_linear')(dgram)
+      
+    pair_activations += common_modules.Linear(c.pair_channel, name='prev_pos_linear')(dgram)
 
     if c.recycle_features:
       if 'prev_msa_first_row' in batch:
