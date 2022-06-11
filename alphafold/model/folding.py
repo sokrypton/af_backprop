@@ -441,8 +441,24 @@ def generate_affines(representations, batch, config, global_config,
       name='pair_layer_norm')(
           representations['pair'])
 
-  outputs = []
+  
+  def fold_iter(act, subkey):
+    act, out = fold_iteration(
+        act,
+        initial_act=initial_act,
+        static_feat_2d=act_2d,
+        safe_key=sub_key,
+        sequence_mask=sequence_mask,
+        update_affine=True,
+        is_training=is_training,
+        aatype=batch['aatype'],
+        scale_rate=batch["scale_rate"])
+    return act, out
   safe_keys = safe_key.split(c.num_layer)
+  activations, output = jax.lax.scan(fold_iter, activations, safe_keys)
+  
+  '''
+  outputs = []
   for sub_key in safe_keys:
     activations, output = fold_iteration(
         activations,
@@ -455,8 +471,9 @@ def generate_affines(representations, batch, config, global_config,
         aatype=batch['aatype'],
         scale_rate=batch["scale_rate"])
     outputs.append(output)
-
   output = jax.tree_map(lambda *x: jnp.stack(x), *outputs)
+  '''
+  
   # Include the activations in the output dict for use by the LDDT-Head.
   output['act'] = activations['act']
 
