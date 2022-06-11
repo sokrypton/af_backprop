@@ -442,7 +442,7 @@ def generate_affines(representations, batch, config, global_config,
           representations['pair'])
 
   
-  def fold_iter(act, subkey):
+  def fold_iter(act, sub_key):
     act, out = fold_iteration(
         act,
         initial_act=initial_act,
