@@ -463,6 +463,14 @@ def generate_affines(representations, batch, config, global_config,
   return output
 
 
+class dummy(hk.Module):
+  def __init__(self, config, global_config, compute_loss=True):
+    super().__init__(name="dummy")
+  def __call__(self, representations, batch, is_training, safe_key=None):
+    if safe_key is None:
+      safe_key = prng.SafeKey(hk.next_rng_key())
+    return {}
+
 class StructureModule(hk.Module):
   """StructureModule as a network head.
 
@@ -500,20 +508,13 @@ class StructureModule(hk.Module):
     ret['final_atom14_positions'] = atom14_pred_positions  # (N, 14, 3)
     ret['final_atom14_mask'] = batch['atom14_atom_exists']  # (N, 14)
     
-    
     atom37_pred_positions = all_atom.atom14_to_atom37(atom14_pred_positions, batch)
     atom37_pred_positions *= batch['atom37_atom_exists'][:, :, None]
     ret['final_atom_positions'] = atom37_pred_positions  # (N, 37, 3)
     ret['final_atom_mask'] = batch['atom37_atom_exists']  # (N, 37)
     ret['final_affines'] = ret['traj'][-1]
 
-    #if self.compute_loss:
     return ret
-    #else:
-    #  no_loss_features = ['final_atom_positions', 'final_atom_mask',
-    #                      'representations', 'final_atom14_positions']
-    #  no_loss_ret = {k: ret[k] for k in no_loss_features}
-    #  return no_loss_ret
 
   def loss(self, value, batch):
     ret = {'loss': 0.}
