@@ -401,30 +401,18 @@ class AlphaFold(hk.Module):
           p_["prev_pae"] += p["prev_pae"]
         return p_
 
-      if self.config.add_prev or self.config.backprop_recycle:
-        def body(p, i):
-          p_ = get_prev(do_call(p, recycle_idx=i, compute_loss=False))
-          if self.config.add_prev:
-            p_ = add_prev(p, p_)
-          return p_, None
-
-        if hk.running_init():
-          prev,_ = body(prev, 0)
-        else:
-          prev,_ = hk.scan(body, prev, jnp.arange(num_iter))
-
+      ##############################################################
+      def body(p, i):
+        p_ = get_prev(do_call(p, recycle_idx=i, compute_loss=False))
+        if self.config.add_prev:
+          p_ = add_prev(p, p_)
+        return p_, None
+      if hk.running_init():
+        prev,_ = body(prev, 0)
       else:
-        def body(x):
-          i,p = x[0],x[1]
-          p_ = get_prev(do_call(p, recycle_idx=i, compute_loss=False))
-          return x[0]+1, p_
-
-        if hk.running_init():
-          # When initializing the Haiku module, run one iteration of the
-          # while_loop to initialize the Haiku modules used in `body`.
-          _, prev = body((0, prev))
-        else:
-          _, prev = hk.while_loop(lambda x: x[0] < num_iter, body, (0, prev))
+        prev,_ = hk.scan(body, prev, jnp.arange(num_iter))
+      ##############################################################
+      
     else:
       num_iter = 0
 
