@@ -441,22 +441,20 @@ def generate_affines(representations, batch, config, global_config,
       name='pair_layer_norm')(
           representations['pair'])
 
-  def fold_iter(x,_):
-    x["key"], key = x["key"].split()
-    x["act"], out = fold_iteration(
-        x["act"],
+  def fold_iter(act, key):
+    act, out = fold_iteration(
+        act,
         initial_act=initial_act,
         static_feat_2d=act_2d,
-        safe_key=key,
+        safe_key=prng.SafeKey(key),
         sequence_mask=sequence_mask,
         update_affine=True,
         is_training=is_training,
         aatype=batch['aatype'],
         scale_rate=batch["scale_rate"])
-    return x, out
-  x = {"act":activations,"key":safe_key}
-  x, output = hk.scan(fold_iter, x, None, c.num_layer)
-  activations = x["act"]
+    return act, out  
+  keys = jax.random.split(safe_key.get(), c.num_layer)
+  activations, output = hk.scan(fold_iter, activations, keys)
   
   # Include the activations in the output dict for use by the LDDT-Head.
   output['act'] = activations['act']
