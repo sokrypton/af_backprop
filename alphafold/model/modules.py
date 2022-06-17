@@ -324,7 +324,7 @@ class AlphaFold(hk.Module):
     else:
       batch_size, num_residues, _ = batch['aatype'].shape
 
-    def get_prev(ret):
+    def get_prev(ret, stop_gradient=False):
       new_prev = {
           'prev_msa_first_row': ret['representations']['msa_first_row'],
           'prev_pair': ret['representations']['pair'],
@@ -332,31 +332,33 @@ class AlphaFold(hk.Module):
       }
       if self.config.use_struct:
         new_prev.update({'prev_pos': ret['structure_module']['final_atom_positions'],
-                         'prev_plddt': ret["predicted_lddt"]["logits"]})
-        
+                         'prev_plddt': ret["predicted_lddt"]["logits"]})        
         if "predicted_aligned_error" in ret:
           new_prev["prev_pae"] = ret["predicted_aligned_error"]["logits"]
-          
-      if not self.config.backprop_recycle:
-        for k in ["prev_pos","prev_msa_first_row","prev_pair"]:
-          if k in new_prev:
-            new_prev[k] = jax.lax.stop_gradient(new_prev[k])
+      
+      if stop_gradient:
+        new_prev = jax.tree_map(lambda x:jax.lax.stop_gradient(x), new_prev)
+        
+      #if not self.config.backprop_recycle:
+      #  for k in ["prev_pos","prev_msa_first_row","prev_pair"]:
+      #    if k in new_prev:
+      #      new_prev[k] = jax.lax.stop_gradient(new_prev[k])
       
       return new_prev
 
-    def do_call(prev,
-                recycle_idx,
-                compute_loss=compute_loss):
-      if self.config.resample_msa_in_recycling:
-        num_ensemble = batch_size // (self.config.num_recycle + 1)
-        def slice_recycle_idx(x):
-          start = recycle_idx * num_ensemble
-          size = num_ensemble
-          return jax.lax.dynamic_slice_in_dim(x, start, size, axis=0)
-        ensembled_batch = jax.tree_map(slice_recycle_idx, batch)
-      else:
-        num_ensemble = batch_size
-        ensembled_batch = batch
+    def do_call(prev, recycle_idx, compute_loss=compute_loss):
+      
+      # if self.config.resample_msa_in_recycling:
+      #   num_ensemble = batch_size // (self.config.num_recycle + 1)
+      #   def slice_recycle_idx(x):
+      #     start = recycle_idx * num_ensemble
+      #     size = num_ensemble
+      #     return jax.lax.dynamic_slice_in_dim(x, start, size, axis=0)
+      #   ensembled_batch = jax.tree_map(slice_recycle_idx, batch)
+      # else:
+      
+      num_ensemble = batch_size
+      ensembled_batch = jax.tree_map(lambda x:x[recycle_idx], batch)
       non_ensembled_batch = jax.tree_map(lambda x: x, prev)
       
       return impl(ensembled_batch=ensembled_batch,
@@ -365,7 +367,6 @@ class AlphaFold(hk.Module):
                   compute_loss=compute_loss,
                   ensemble_representations=ensemble_representations)
 
-    
     emb_config = self.config.embeddings_and_evoformer
     prev = {
         'prev_msa_first_row': jnp.zeros([num_residues, emb_config.msa_channel]),
@@ -376,63 +377,47 @@ class AlphaFold(hk.Module):
       prev.update({'prev_pos': jnp.zeros([num_residues, residue_constants.atom_type_num, 3]),
                    'prev_plddt': jnp.zeros([num_residues, 50]),
                    'prev_pae': jnp.zeros([num_residues, num_residues, 64])})
-
-    for k in ["pos","msa_first_row","pair","dgram"]:
-      if f"init_{k}" in batch: prev[f"prev_{k}"] = batch[f"init_{k}"][0]
+      
+    #  copy previous from input batch (if defined)
+    if "prev" in batch: prev.update(batch["prev"])
+    # for k in ["pos","msa_first_row","pair","dgram"]:
+    #   if f"init_{k}" in batch: prev[f"prev_{k}"] = batch[f"init_{k}"][0]
+      
+    def add_prev(p, p_):
+      return jax.tree_map(lambda *x:sum(x), p, p_)
+      
+      # p_["prev_dgram"] += p["prev_dgram"]
+      # if self.config.use_struct:
+      #   p_["prev_plddt"] += p["prev_plddt"]
+      #   p_["prev_pae"] += p["prev_pae"]
+      # return p_
     
-    if self.config.num_recycle:
-      if 'num_iter_recycling' in batch:
-        # Training time: num_iter_recycling is in batch.
-        # The value for each ensemble batch is the same, so arbitrarily taking
-        # 0-th.
-        num_iter = batch['num_iter_recycling'][0]
-
-        # Add insurance that we will not run more
-        # recyclings than the model is configured to run.
-        num_iter = jnp.minimum(num_iter, self.config.num_recycle)
-      else:
-        # Eval mode or tests: use the maximum number of iterations.
-        num_iter = self.config.num_recycle
-      
-      def add_prev(p,p_):
-        p_["prev_dgram"] += p["prev_dgram"]
-        if self.config.use_struct:
-          p_["prev_plddt"] += p["prev_plddt"]
-          p_["prev_pae"] += p["prev_pae"]
-        return p_
-
-      ##############################################################
-      def body(p, i):
-        p_ = get_prev(do_call(p, recycle_idx=i, compute_loss=False))
-        if self.config.add_prev:
-          p_ = add_prev(p, p_)
-        return p_, None
-      if hk.running_init():
-        prev,_ = body(prev, 0)
-      else:
-        prev,_ = hk.scan(body, prev, jnp.arange(num_iter))
-      ##############################################################
-      
-    else:
-      num_iter = 0
-
+    def body(p, i):
+      ret_ = do_call(p, recycle_idx=i, compute_loss=False)
+      p_ = get_prev(ret_)
+      if self.config.add_prev:
+        p_ = add_prev(p, p_)
+      return p_, None
+    
+    num_iter = self.config.num_recycle
+    prev,_ = hk.scan(body, prev, jnp.arange(num_iter))
     ret = do_call(prev=prev, recycle_idx=num_iter)
-    if self.config.add_prev:
-      prev_ = get_prev(ret)
+    ret["prev"] = get_prev(ret)
+    
     if compute_loss:
       ret = ret[0], [ret[1]]
 
+    if self.config.add_prev:
+      prev_ = add_prev(prev, ret["prev"])
+      prev_ = jax.tree_map(lambda x:x/(num_iter+1),prev_)
+      ret["distogram"]["logits"] = prev_["prev_dgram"]
+      if "prev_plddt" in prev_:
+        ret["predicted_lddt"]["logits"] = prev_["prev_plddt"]
+      if "pre_pae" in prev_:
+        ret["predicted_aligned_error"]["logits"] = prev_["prev_pae"]
+
     if not return_representations:
       del (ret[0] if compute_loss else ret)['representations']  # pytype: disable=unsupported-operands
-
-    if self.config.add_prev and num_iter > 0:
-      prev_ = add_prev(prev, prev_)
-      ret["distogram"]["logits"] = prev_["prev_dgram"]/(num_iter+1)
-      if self.config.use_struct:
-        ret["predicted_lddt"]["logits"] = prev_["prev_plddt"]/(num_iter+1)
-        if "predicted_aligned_error" in ret:
-          ret["predicted_aligned_error"]["logits"] = prev_["prev_pae"]/(num_iter+1)
-
     return ret
 
 class TemplatePairStack(hk.Module):
