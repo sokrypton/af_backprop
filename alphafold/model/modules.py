@@ -332,9 +332,8 @@ class AlphaFold(hk.Module):
       }
       if self.config.use_struct:
         new_prev.update({'prev_pos': ret['structure_module']['final_atom_positions'],
-                         'prev_plddt': ret["predicted_lddt"]["logits"]})        
-        if "predicted_aligned_error" in ret:
-          new_prev["prev_pae"] = ret["predicted_aligned_error"]["logits"]
+                         'prev_plddt': ret["predicted_lddt"]["logits"],
+                         'prev_pae': ret["predicted_aligned_error"]["logits"]})
       
       return new_prev
 
@@ -371,7 +370,7 @@ class AlphaFold(hk.Module):
                    'prev_pae': jnp.zeros([num_residues, num_residues, 64])})
       
     #  copy previous from input batch (if defined)
-    if "prev" in batch: prev.update(batch["prev"])
+    if "prev" in batch: prev.update(batch.pop("prev"))
     # for k in ["pos","msa_first_row","pair","dgram"]:
     #   if f"init_{k}" in batch: prev[f"prev_{k}"] = batch[f"init_{k}"][0]
       
@@ -402,9 +401,8 @@ class AlphaFold(hk.Module):
       prev_ = add_prev(prev, ret["prev"])
       prev_ = jax.tree_map(lambda x:x/(num_iter+1),prev_)
       ret["distogram"]["logits"] = prev_["prev_dgram"]
-      if "prev_plddt" in prev_:
+      if self.config.use_struct:
         ret["predicted_lddt"]["logits"] = prev_["prev_plddt"]
-      if "pre_pae" in prev_:
         ret["predicted_aligned_error"]["logits"] = prev_["prev_pae"]
 
     #if compute_loss:
