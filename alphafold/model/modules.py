@@ -147,20 +147,9 @@ class AlphaFoldIteration(hk.Module):
                ensemble_representations=False,
                return_representations=False):
 
-    num_ensemble = jnp.asarray(ensembled_batch['seq_length'].shape[0])
-
-    if not ensemble_representations:
-      assert ensembled_batch['seq_length'].shape[0] == 1
-
-    def slice_batch(i):
-      b = {k: v[i] for k, v in ensembled_batch.items()}
-      b.update(non_ensembled_batch)
-      return b
-
     # Compute representations for each batch element and average.
-    evoformer_module = EmbeddingsAndEvoformer(
-        self.config.embeddings_and_evoformer, self.global_config)
-    batch0 = slice_batch(0)
+    evoformer_module = EmbeddingsAndEvoformer(self.config.embeddings_and_evoformer, self.global_config)
+    batch0 = {**ensembled_batch, **non_ensembled_batch}
     representations = evoformer_module(batch0, is_training)
 
     # MSA representations are not ensembled so
@@ -168,42 +157,13 @@ class AlphaFoldIteration(hk.Module):
     msa_representation = representations['msa']
     del representations['msa']
 
-    # Average the representations (except MSA) over the batch dimension.
-    if ensemble_representations:
-      def body(x):
-        """Add one element to the representations ensemble."""
-        i, current_representations = x
-        feats = slice_batch(i)
-        representations_update = evoformer_module(
-            feats, is_training)
-
-        new_representations = {}
-        for k in current_representations:
-          new_representations[k] = (
-              current_representations[k] + representations_update[k])
-        return i+1, new_representations
-
-      if hk.running_init():
-        # When initializing the Haiku module, run one iteration of the
-        # while_loop to initialize the Haiku modules used in `body`.
-        _, representations = body((1, representations))
-      else:
-        _, representations = hk.while_loop(
-            lambda x: x[0] < num_ensemble,
-            body,
-            (1, representations))
-
-      for k in representations:
-        if k != 'msa':
-          representations[k] /= num_ensemble.astype(representations[k].dtype)
-
     representations['msa'] = msa_representation
     batch = batch0  # We are not ensembled from here on.
     
     if jnp.issubdtype(ensembled_batch['aatype'].dtype, jnp.integer):
-      _, num_residues = ensembled_batch['aatype'].shape
+      num_residues = ensembled_batch['aatype'].shape
     else:
-      _, num_residues, _ = ensembled_batch['aatype'].shape
+      num_residues, _ = ensembled_batch['aatype'].shape
 
     if self.config.use_struct:
       struct_module = folding.StructureModule
@@ -316,9 +276,9 @@ class AlphaFold(hk.Module):
       The output of AlphaFoldIteration is a nested dictionary containing
       predictions from the various heads.
     """
-    if "scale_rate" not in batch:
-      batch["scale_rate"] = jnp.ones((1,))
+    if "scale_rate" not in batch: batch["scale_rate"] = jnp.ones((1,))
     impl = AlphaFoldIteration(self.config, self.global_config)
+
     if jnp.issubdtype(batch['aatype'].dtype, jnp.integer):
       batch_size, num_residues = batch['aatype'].shape
     else:
@@ -328,25 +288,15 @@ class AlphaFold(hk.Module):
       new_prev = {
           'prev_msa_first_row': ret['representations']['msa_first_row'],
           'prev_pair': ret['representations']['pair'],
-          'prev_dgram': ret["distogram"]["logits"],
       }
       if self.config.use_struct:
-        new_prev.update({'prev_pos': ret['structure_module']['final_atom_positions'],
-                         'prev_plddt': ret["predicted_lddt"]["logits"],
-                         'prev_pae': ret["predicted_aligned_error"]["logits"]})
-      
-      return new_prev
+        new_prev['prev_pos'] = ret['structure_module']['final_atom_positions']
+      else:
+        new_prev['prev_dgram'] = ret["distogram"]["logits"]
 
+      return new_prev
+    
     def do_call(prev, recycle_idx, compute_loss=compute_loss):
-      
-      # if self.config.resample_msa_in_recycling:
-      #   num_ensemble = batch_size // (self.config.num_recycle + 1)
-      #   def slice_recycle_idx(x):
-      #     start = recycle_idx * num_ensemble
-      #     size = num_ensemble
-      #     return jax.lax.dynamic_slice_in_dim(x, start, size, axis=0)
-      #   ensembled_batch = jax.tree_map(slice_recycle_idx, batch)
-      # else:
       
       num_ensemble = batch_size
       ensembled_batch = jax.tree_map(lambda x:x[recycle_idx], batch)
@@ -360,56 +310,20 @@ class AlphaFold(hk.Module):
 
     emb_config = self.config.embeddings_and_evoformer
     prev = {
-        'prev_msa_first_row': jnp.zeros([num_residues, emb_config.msa_channel]),
-        'prev_pair': jnp.zeros([num_residues, num_residues, emb_config.pair_channel]),
-        'prev_dgram': jnp.zeros([num_residues, num_residues, 64]),
+      'prev_msa_first_row': jnp.zeros([num_residues, emb_config.msa_channel]),
+      'prev_pair': jnp.zeros([num_residues, num_residues, emb_config.pair_channel])
     }
     if self.config.use_struct:
-      prev.update({'prev_pos': jnp.zeros([num_residues, residue_constants.atom_type_num, 3]),
-                   'prev_plddt': jnp.zeros([num_residues, 50]),
-                   'prev_pae': jnp.zeros([num_residues, num_residues, 64])})
+      prev['prev_pos'] = jnp.zeros([num_residues, residue_constants.atom_type_num, 3])
+    else:
+      prev['prev_dgram'] = jnp.zeros([num_residues, num_residues, 64])
       
     #  copy previous from input batch (if defined)
     if "prev" in batch: prev.update(batch.pop("prev"))
-    # for k in ["pos","msa_first_row","pair","dgram"]:
-    #   if f"init_{k}" in batch: prev[f"prev_{k}"] = batch[f"init_{k}"][0]
-      
-    def add_prev(p, p_):
-      return jax.tree_map(lambda *x:sum(x), p, p_)
-      
-      # p_["prev_dgram"] += p["prev_dgram"]
-      # if self.config.use_struct:
-      #   p_["prev_plddt"] += p["prev_plddt"]
-      #   p_["prev_pae"] += p["prev_pae"]
-      # return p_
-    
-    def body(p, i):
-      ret_ = do_call(p, recycle_idx=i, compute_loss=False)
-      p_ = get_prev(ret_)
-      if self.config.add_prev: p_ = add_prev(p, p_)
-      return p_, None
-    
-    num_iter = self.config.num_recycle
-    prev,_ = hk.scan(body, prev, jnp.arange(num_iter))
-    if not (self.config.add_prev or self.config.backprop):
-      prev = jax.tree_map(lambda x:jax.lax.stop_gradient(x), prev)
-      
-    ret = do_call(prev=prev, recycle_idx=num_iter)
+            
+    ret = do_call(prev=prev, recycle_idx=0)
     ret["prev"] = get_prev(ret)
-    
-    if self.config.add_prev:
-      prev_ = add_prev(prev, ret["prev"])
-      prev_ = jax.tree_map(lambda x:x/(num_iter+1),prev_)
-      ret["distogram"]["logits"] = prev_["prev_dgram"]
-      if self.config.use_struct:
-        ret["predicted_lddt"]["logits"] = prev_["prev_plddt"]
-        ret["predicted_aligned_error"]["logits"] = prev_["prev_pae"]
-
-    #if compute_loss:
-    #  ret = ret[0], [ret[1]]
-    #if not return_representations:
-    #  del (ret[0] if compute_loss else ret)['representations']  # pytype: disable=unsupported-operands
-    
+        
     return ret
 
 class TemplatePairStack(hk.Module):
