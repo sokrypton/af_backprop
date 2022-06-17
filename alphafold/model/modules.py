@@ -324,7 +324,7 @@ class AlphaFold(hk.Module):
     else:
       batch_size, num_residues, _ = batch['aatype'].shape
 
-    def get_prev(ret, stop_gradient=False):
+    def get_prev(ret):
       new_prev = {
           'prev_msa_first_row': ret['representations']['msa_first_row'],
           'prev_pair': ret['representations']['pair'],
@@ -335,14 +335,6 @@ class AlphaFold(hk.Module):
                          'prev_plddt': ret["predicted_lddt"]["logits"]})        
         if "predicted_aligned_error" in ret:
           new_prev["prev_pae"] = ret["predicted_aligned_error"]["logits"]
-      
-      if stop_gradient:
-        new_prev = jax.tree_map(lambda x:jax.lax.stop_gradient(x), new_prev)
-        
-      #if not self.config.backprop_recycle:
-      #  for k in ["prev_pos","prev_msa_first_row","prev_pair"]:
-      #    if k in new_prev:
-      #      new_prev[k] = jax.lax.stop_gradient(new_prev[k])
       
       return new_prev
 
@@ -395,18 +387,17 @@ class AlphaFold(hk.Module):
     def body(p, i):
       ret_ = do_call(p, recycle_idx=i, compute_loss=False)
       p_ = get_prev(ret_)
-      if self.config.add_prev:
-        p_ = add_prev(p, p_)
+      if self.config.add_prev: p_ = add_prev(p, p_)
       return p_, None
     
     num_iter = self.config.num_recycle
     prev,_ = hk.scan(body, prev, jnp.arange(num_iter))
+    if not (self.config.add_prev or self.config.backprop):
+      prev = jax.tree_map(lambda x:jax.lax.stop_gradient(x), prev)
+      
     ret = do_call(prev=prev, recycle_idx=num_iter)
     ret["prev"] = get_prev(ret)
     
-    if compute_loss:
-      ret = ret[0], [ret[1]]
-
     if self.config.add_prev:
       prev_ = add_prev(prev, ret["prev"])
       prev_ = jax.tree_map(lambda x:x/(num_iter+1),prev_)
@@ -416,8 +407,11 @@ class AlphaFold(hk.Module):
       if "pre_pae" in prev_:
         ret["predicted_aligned_error"]["logits"] = prev_["prev_pae"]
 
-    if not return_representations:
-      del (ret[0] if compute_loss else ret)['representations']  # pytype: disable=unsupported-operands
+    #if compute_loss:
+    #  ret = ret[0], [ret[1]]
+    #if not return_representations:
+    #  del (ret[0] if compute_loss else ret)['representations']  # pytype: disable=unsupported-operands
+    
     return ret
 
 class TemplatePairStack(hk.Module):
