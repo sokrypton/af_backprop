@@ -14,17 +14,22 @@ from alphafold.model.tf import shape_placeholders
 #######################
 # reshape inputs
 #######################
-def make_fixed_size(feat, model_runner, length, batch_axis=True):
+def make_fixed_size(feat, model_runner, length, batch_axis=True, bugfix=False):
   '''pad input features'''
   cfg = model_runner.config
   if batch_axis:
     shape_schema = {k:[None]+v for k,v in dict(cfg.data.eval.feat).items()}
   else:
     shape_schema = {k:v for k,v in dict(cfg.data.eval.feat).items()}
-
+  
+  if bugfix:
+    num_msa = cfg.data.eval.max_msa_clusters - cfg.data.eval.max_templates
+  else:
+    num_msa = cfg.data.eval.max_msa_clusters
+    
   pad_size_map = {
       shape_placeholders.NUM_RES: length,
-      shape_placeholders.NUM_MSA_SEQ: cfg.data.eval.max_msa_clusters,
+      shape_placeholders.NUM_MSA_SEQ: num_msa,
       shape_placeholders.NUM_EXTRA_SEQ: cfg.data.common.max_extra_msa,
       shape_placeholders.NUM_TEMPLATES: cfg.data.eval.max_templates
   }
