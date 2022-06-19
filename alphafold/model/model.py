@@ -87,9 +87,9 @@ class RunModel:
       if "prev" in feat:
         prev = feat["prev"]
       else:
-        L = feat['aatype'][1]
+        L = feat['aatype'].shape[1]
         prev = {'prev_msa_first_row': np.zeros([L,256]), 'prev_pair': np.zeros([L,L,128])}
-        if self.config.use_struct: prev['prev_pos'] = np.zeros([L,37,3])
+        if self.config.model.use_struct: prev['prev_pos'] = np.zeros([L,37,3])
         else: prev['prev_dgram'] = np.zeros([L,L,64])
 
       def recycle(prev, key):
@@ -192,7 +192,8 @@ class RunModel:
     logging.info('Running predict with shape(feat) = %s', tree.map_structure(lambda x: x.shape, feat))
 
     result = self.apply(self.params, jax.random.PRNGKey(0), feat)
-    if self.config.use_struct: result.update(get_confidence_metrics(result))
+    if self.config.model.use_struct:
+      result.update(get_confidence_metrics(result))
         
     logging.info('Output shape was %s', tree.map_structure(lambda x: x.shape, result))
     return result
