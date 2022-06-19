@@ -319,7 +319,12 @@ class AlphaFold(hk.Module):
       prev['prev_dgram'] = jnp.zeros([num_residues, num_residues, 64])
       
     #  copy previous from input batch (if defined)
-    if "prev" in batch: prev.update(batch.pop("prev"))
+    if "prev" in batch:
+      prev.update(batch.pop("prev"))
+    # backward compatibility
+    for k in ["pos","msa_first_row","pair","dgram"]:
+      if f"init_{k}" in batch:
+        prev[f"prev_{k}"] = batch.pop(f"init_{k}")[0]
             
     ret = do_call(prev=prev, recycle_idx=0)
     ret["prev"] = get_prev(ret)
