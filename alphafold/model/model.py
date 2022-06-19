@@ -52,9 +52,20 @@ class RunModel:
                config: ml_collections.ConfigDict,
                params: Optional[Mapping[str, Mapping[str, np.ndarray]]] = None,
                is_training=True,
-               return_representations=True):
+               return_representations=True,
+               recycle_mode=None):
     self.config = config
     self.params = params
+
+    # backward compatibility
+    self.mode = recycle_mode
+    if self.mode is None:
+      if self.config.model.add_prev:
+        self.mode = "add_prev"
+      elif self.config.model.backprop_recycle:
+        self.mode = "backprop"
+      else:
+        self.mode = "last"
 
     def _forward_fn(batch):
       model = modules.AlphaFold(self.config.model)
@@ -64,9 +75,57 @@ class RunModel:
           compute_loss=False,
           ensemble_representations=False,
           return_representations=return_representations)
-
-    self.apply = jax.jit(hk.transform(_forward_fn).apply)
+    
     self.init = jax.jit(hk.transform(_forward_fn).init)
+    
+    def apply(params, key, feat):
+      _apply = hk.transform(_forward_fn).apply
+      if "num_iter_recycling" in feat:
+        recycles = feat.pop("num_iter_recycling")[0]
+      else:
+        recycles = self.config.model.num_recycle
+      if "prev" in feat:
+        prev = feat["prev"]
+      else:
+        L = feat['aatype'].shape[1]
+        prev = {'prev_msa_first_row': np.zeros([L,256]), 'prev_pair': np.zeros([L,L,128])}
+        if self.config.model.use_struct: prev['prev_pos'] = np.zeros([L,37,3])
+        else: prev['prev_dgram'] = np.zeros([L,L,64])
+
+      def recycle(prev, key):
+        feat["prev"] = prev
+        results = _apply(params, key, feat)
+        prev = results["prev"]
+        if self.mode != "backprop":
+            prev = jax.lax.stop_gradient(prev)
+        return prev, results
+
+      if self.mode in ["backprop","add_prev"]:
+        num_iters = recycles + 1
+        keys = jax.random.split(key, num_iters)
+        _, o = jax.lax.scan(recycle, prev, keys)
+        results = jax.tree_map(lambda x:x[-1], o)
+
+        if self.mode == "add_prev":
+          for k in ["distogram","predicted_lddt","predicted_aligned_error"]:
+            results[k]["logits"] = o[k]["logits"].mean(0)
+
+      elif self.mode in ["last","sample"]:
+        def body(x):
+          i,prev,key = x
+          key,_key = jax.random.split(key)
+          prev, _ = recycle(prev, _key)          
+          return (x[0]+1, prev, key)
+
+        _, prev, key = jax.lax.while_loop(lambda x: x[0] < recycles, body, (0,prev,key))
+        _, results = recycle(prev, key)      
+      
+      else:
+        results = _apply(params, key, feat)
+      
+      return results
+    
+    self.apply = jax.jit(apply)
 
   def init_params(self, feat: features.FeatureDict, random_seed: int = 0):
     """Initializes the model parameters.
@@ -114,8 +173,7 @@ class RunModel:
 
   def eval_shape(self, feat: features.FeatureDict) -> jax.ShapeDtypeStruct:
     self.init_params(feat)
-    logging.info('Running eval_shape with shape(feat) = %s',
-                 tree.map_structure(lambda x: x.shape, feat))
+    logging.info('Running eval_shape with shape(feat) = %s', tree.map_structure(lambda x: x.shape, feat))
     shape = jax.eval_shape(self.apply, self.params, jax.random.PRNGKey(0), feat)
     logging.info('Output shape was %s', shape)
     return shape
@@ -131,14 +189,11 @@ class RunModel:
       A dictionary of model outputs.
     """
     self.init_params(feat)
-    logging.info('Running predict with shape(feat) = %s',
-                 tree.map_structure(lambda x: x.shape, feat))
+    logging.info('Running predict with shape(feat) = %s', tree.map_structure(lambda x: x.shape, feat))
+
     result = self.apply(self.params, jax.random.PRNGKey(0), feat)
-    # This block is to ensure benchmark timings are accurate. Some blocking is
-    # already happening when computing get_confidence_metrics, and this ensures
-    # all outputs are blocked on.
-    jax.tree_map(lambda x: x.block_until_ready(), result)
-    result.update(get_confidence_metrics(result))
-    logging.info('Output shape was %s',
-                 tree.map_structure(lambda x: x.shape, result))
+    if self.config.model.use_struct:
+      result.update(get_confidence_metrics(result))
+        
+    logging.info('Output shape was %s', tree.map_structure(lambda x: x.shape, result))
     return result
