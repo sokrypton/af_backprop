@@ -64,9 +64,71 @@ class RunModel:
           compute_loss=False,
           ensemble_representations=False,
           return_representations=return_representations)
-
-    self.apply = jax.jit(hk.transform(_forward_fn).apply)
+    
     self.init = jax.jit(hk.transform(_forward_fn).init)
+    
+    def apply(params, key, feat, mode=None, recycles=None, prev=None):    
+        
+        _apply = hk.transform(_forward_fn).apply
+        
+        if mode is None:
+            # backward compatibility
+            if self.config.model.add_prev:
+                mode = "add_prev"
+            elif self.config.model.backprop_recycle:
+                mode = "backprop"
+            else:
+                mode = "last"
+
+        if recycles is None:
+            if "num_iter_recycling" in feat:
+                recycles = feat["num_iter_recycling"][0]
+            else:
+                recycles = self.config.model.num_recycle        
+
+        if prev is None:
+            if "prev" in feat:
+                prev = feat["prev"]
+            else:
+                L = feat['aatype'][1]
+                prev = {'prev_msa_first_row': np.zeros([L,256]), 'prev_pair': np.zeros([L,L,128])}
+                if self.config.use_struct: prev['prev_pos'] = np.zeros([L,37,3])
+                else: prev['prev_dgram'] = np.zeros([L,L,64])
+
+        def recycle(prev, key):
+            feat["prev"] = prev
+            results = _apply(parms, key, feat)
+            prev = results["prev"]
+            if mode != "backprop":
+                prev = jax.lax.stop_gradient(prev)
+            return prev, results
+
+        if mode in ["backprop","add_prev"]:
+            num_iters = recycles + 1
+            keys = jax.random.split(key, num_iters)
+            _, o = jax.lax.scan(recycle, prev, keys)
+            results = jax.tree_map(lambda x:x[-1], o)
+
+            if mode == "add_prev":
+                for k in ["distogram","predicted_lddt","predicted_aligned_error"]:
+                    results[k]["logits"] = o[k]["logits"].mean(0)
+
+        elif mode in ["last","sample"]:
+            def body(x):
+                i,prev,key = x
+                key,_key = jax.random.split(key)
+                prev, _ = recycle(prev, _key)          
+                return (x[0]+1, prev, key)
+
+            _, prev, key = jax.lax.while_loop(lambda x: x[0] < recycles, body, (0,prev,key))
+            _, results = recycle(prev, key)
+        
+        else:
+            results = _apply(params, key, feat)
+
+        return results
+    
+    self.apply = jax.jit(apply)
 
   def init_params(self, feat: features.FeatureDict, random_seed: int = 0):
     """Initializes the model parameters.
@@ -114,13 +176,12 @@ class RunModel:
 
   def eval_shape(self, feat: features.FeatureDict) -> jax.ShapeDtypeStruct:
     self.init_params(feat)
-    logging.info('Running eval_shape with shape(feat) = %s',
-                 tree.map_structure(lambda x: x.shape, feat))
+    logging.info('Running eval_shape with shape(feat) = %s', tree.map_structure(lambda x: x.shape, feat))
     shape = jax.eval_shape(self.apply, self.params, jax.random.PRNGKey(0), feat)
     logging.info('Output shape was %s', shape)
     return shape
 
-  def predict(self, feat: features.FeatureDict) -> Mapping[str, Any]:
+  def predict(self, feat: features.FeatureDict, recycle_mode=None) -> Mapping[str, Any]:
     """Makes a prediction by inferencing the model on the provided features.
 
     Args:
@@ -131,15 +192,10 @@ class RunModel:
       A dictionary of model outputs.
     """
     self.init_params(feat)
-    logging.info('Running predict with shape(feat) = %s',
-                 tree.map_structure(lambda x: x.shape, feat))
-    result = self.apply(self.params, jax.random.PRNGKey(0), feat)
-    # This block is to ensure benchmark timings are accurate. Some blocking is
-    # already happening when computing get_confidence_metrics, and this ensures
-    # all outputs are blocked on.
-    jax.tree_map(lambda x: x.block_until_ready(), result)
-    if self.config.use_struct:
-        result.update(get_confidence_metrics(result))
-    logging.info('Output shape was %s',
-                 tree.map_structure(lambda x: x.shape, result))
+    logging.info('Running predict with shape(feat) = %s', tree.map_structure(lambda x: x.shape, feat))
+
+    result = self.apply(self.params, jax.random.PRNGKey(0), feat, recycle_mode)
+    if self.config.use_struct: result.update(get_confidence_metrics(result))
+        
+    logging.info('Output shape was %s', tree.map_structure(lambda x: x.shape, result))
     return result
