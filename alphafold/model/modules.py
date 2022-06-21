@@ -315,7 +315,7 @@ class AlphaFold(hk.Module):
       if f"init_{k}" in batch:
         prev[f"prev_{k}"] = batch.pop(f"init_{k}")[0]
                   
-    ret = impl(ensembled_batch=batch,
+    ret = impl(ensembled_batch=jax.tree_map(lambda x:x[0], batch),
                non_ensembled_batch=prev,
                is_training=is_training,
                compute_loss=compute_loss,
