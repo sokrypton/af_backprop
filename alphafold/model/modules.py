@@ -296,18 +296,6 @@ class AlphaFold(hk.Module):
 
       return new_prev
     
-    def do_call(prev, recycle_idx, compute_loss=compute_loss):
-      
-      num_ensemble = batch_size
-      ensembled_batch = jax.tree_map(lambda x:x[recycle_idx], batch)
-      non_ensembled_batch = jax.tree_map(lambda x: x, prev)
-      
-      return impl(ensembled_batch=ensembled_batch,
-                  non_ensembled_batch=non_ensembled_batch,
-                  is_training=is_training,
-                  compute_loss=compute_loss,
-                  ensemble_representations=ensemble_representations)
-
     emb_config = self.config.embeddings_and_evoformer
     prev = {
       'prev_msa_first_row': jnp.zeros([num_residues, emb_config.msa_channel]),
@@ -321,14 +309,19 @@ class AlphaFold(hk.Module):
     #  copy previous from input batch (if defined)
     if "prev" in batch:
       prev.update(batch.pop("prev"))
+    
     # backward compatibility
     for k in ["pos","msa_first_row","pair","dgram"]:
       if f"init_{k}" in batch:
         prev[f"prev_{k}"] = batch.pop(f"init_{k}")[0]
-            
-    ret = do_call(prev=prev, recycle_idx=0)
-    ret["prev"] = get_prev(ret)
-        
+                  
+    ret = impl(ensembled_batch=jax.tree_map(lambda x:x[0], batch),
+               non_ensembled_batch=prev,
+               is_training=is_training,
+               compute_loss=compute_loss,
+               ensemble_representations=ensemble_representations)
+
+    ret["prev"] = get_prev(ret)        
     return ret
 
 class TemplatePairStack(hk.Module):
