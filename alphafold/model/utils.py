@@ -53,7 +53,6 @@ def mask_mean(mask, value, axis=None, drop_mask_channel=False, eps=1e-10):
     axis = [axis]
   elif axis is None:
     axis = list(range(len(mask_shape)))
-
   broadcast_factor = 1.
   for axis_ in axis:
     value_size = value_shape[axis_]
